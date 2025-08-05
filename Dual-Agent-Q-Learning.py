@@ -1,18 +1,9 @@
 """
-DUAL-AGENT Q-Learning VANET Server
-==================================
+REVISED DUAL-AGENT Q-LEARNING WITH SCIENTIFIC DENSITY CATEGORIZATION
+===================================================================
 
-This script implements a SEPARATED MAC/PHY Q-learning architecture for VANET optimization.
-Based on the dual-agent SAC approach with:
-- MAC Agent: Controls beacon rate and MCS (CBR-focused)
-- PHY Agent: Controls transmission power (SINR-focused)
-- Neighbor-aware optimization
-- Centralized learning manager
-
-QUICK START:
-1. For TRAINING: Set OPERATION_MODE = "TRAINING" below
-2. For TESTING: Set OPERATION_MODE = "TESTING" below  
-3. Run: python dual_qlearning_server.py
+Updated to align with VANET system's evidence-based density categories
+while maintaining antenna awareness through performance expectations.
 """
 
 import socket
@@ -30,115 +21,145 @@ from scipy.stats import entropy
 import sys
 import logging
 
-# ================== CONFIGURATION (REPLACE THE EXISTING CONFIGURATION SECTION) ==================
-# CHANGE THIS TO SWITCH BETWEEN MODES
+# ================== CONFIGURATION ==================
 OPERATION_MODE = "TESTING"        # Options: "TRAINING" or "TESTING"
-
-# NEW: Antenna Type Configuration (doesn't require VANET script changes)
 ANTENNA_TYPE = "SECTORAL"          # Options: "SECTORAL" or "OMNIDIRECTIONAL"
-# This setting tells the dual-agent system how to optimize internally
-# The VANET script interface remains exactly the same
 
 # ================== Constants ==================
-CBR_TARGET = 0.65                  # Target CBR for optimal performance
-CBR_RANGE = (0.6, 0.7)             # Acceptable CBR range
-BUFFER_SIZE = 100000               # Experience buffer size
-LEARNING_RATE = 0.15               # Q-learning rate
-DISCOUNT_FACTOR = 0.95             # Future reward discount
-EPSILON = 1.0                      # Initial exploration rate
-EPSILON_DECAY = 0.9995             # Exploration decay
-MIN_EPSILON = 0.1                  # Minimum exploration
-HOST = '127.0.0.1'                 # Server IP
-PORT = 5000                        # Server port
+CBR_TARGET = 0.4                   # Better latency/PDR performance
+CBR_RANGE = (0.35, 0.45)          # Acceptable CBR range
+SINR_TARGET = 12.0                 # Fixed SINR target
+SINR_GOOD_THRESHOLD = 12.0         # Threshold for diminishing returns
+
+BUFFER_SIZE = 100000
+LEARNING_RATE = 0.15
+DISCOUNT_FACTOR = 0.95
+EPSILON = 1.0
+EPSILON_DECAY = 0.9995
+MIN_EPSILON = 0.1
+HOST = '127.0.0.1'
+PORT = 5000
 
 # Power and beacon ranges
-POWER_MIN = 1                      # Minimum power (dBm) 
-POWER_MAX = 30                     # Maximum power (dBm)
-BEACON_MIN = 1                     # Minimum beacon rate (Hz)
-BEACON_MAX = 20                    # Maximum beacon rate (Hz)
+POWER_MIN = 1
+POWER_MAX = 30
+BEACON_MIN = 1
+BEACON_MAX = 20
 
-# File paths - Include antenna type in filename for separate models
+# File paths
 MODEL_PREFIX = f"{ANTENNA_TYPE.lower()}_dual_agent"
 MAC_MODEL_PATH = f'{MODEL_PREFIX}_mac_qlearning_model.npy'
 PHY_MODEL_PATH = f'{MODEL_PREFIX}_phy_qlearning_model.npy'
 PERFORMANCE_LOG_PATH = f'{MODEL_PREFIX}_performance.xlsx'
-MODEL_SAVE_INTERVAL = 50           # Save model every N episodes
-PERFORMANCE_LOG_INTERVAL = 10      # Log performance every N episodes
+MODEL_SAVE_INTERVAL = 50
+PERFORMANCE_LOG_INTERVAL = 10
 
+# ================== DENSITY CATEGORIZATION ==================
+# Based on VANET system with antenna awareness
+def get_neighbor_category(neighbor_count, antenna_type="OMNIDIRECTIONAL"):
+    """
+    REVISED: Evidence-based density categorization aligned with VANET system
+    
+    Base thresholds from VANET research:
+    - LOW: ≤10 neighbors (Expected SINR: 15-30 dB)
+    - MEDIUM: ≤20 neighbors (Expected SINR: 8-20 dB) 
+    - HIGH: ≤30 neighbors (Expected SINR: 2-12 dB)
+    - VERY_HIGH: >30 neighbors (Expected SINR: -5 to 8 dB)
+    
+    Antenna awareness: Sectoral antennas can handle ~20-30% higher density
+    due to spatial filtering and reduced interference.
+    """
+    if antenna_type.upper() == "SECTORAL":
+        # Sectoral can handle higher densities due to spatial filtering
+        if neighbor_count <= 13:      # ~30% higher than 10
+            return "LOW"
+        elif neighbor_count <= 26:    # ~30% higher than 20
+            return "MEDIUM"
+        elif neighbor_count <= 40:    # ~33% higher than 30
+            return "HIGH"
+        else:
+            return "VERY_HIGH"
+    else:
+        # Omnidirectional - use VANET system directly
+        if neighbor_count <= 10:
+            return "LOW"
+        elif neighbor_count <= 20:
+            return "MEDIUM"
+        elif neighbor_count <= 30:
+            return "HIGH"
+        else:
+            return "VERY_HIGH"
+
+def get_expected_sinr_range(neighbor_count, antenna_type="OMNIDIRECTIONAL"):
+    """
+    Get expected SINR range based on density category and antenna type
+    
+    Base ranges from VANET system, adjusted for antenna characteristics
+    """
+    category = get_neighbor_category(neighbor_count, antenna_type)
+    
+    if antenna_type.upper() == "SECTORAL":
+        # Sectoral antennas achieve ~3-5 dB better SINR due to directional gain
+        ranges = {
+            "LOW": (18, 35),        # +3 dB from (15-30)
+            "MEDIUM": (11, 25),     # +3-5 dB from (8-20)
+            "HIGH": (5, 17),        # +3-5 dB from (2-12) 
+            "VERY_HIGH": (-2, 13)   # +3-5 dB from (-5 to 8)
+        }
+    else:
+        # Omnidirectional - use VANET ranges directly
+        ranges = {
+            "LOW": (15, 30),
+            "MEDIUM": (8, 20),
+            "HIGH": (2, 12),
+            "VERY_HIGH": (-5, 8)
+        }
+    
+    return ranges.get(category, (8, 20))
+
+def get_density_multiplier(neighbor_count, antenna_type="OMNIDIRECTIONAL"):
+    """Density-based reward multiplier using revised categories"""
+    category = get_neighbor_category(neighbor_count, antenna_type)
+    multipliers = {
+        "LOW": 0.8,
+        "MEDIUM": 1.0,        # Baseline
+        "HIGH": 1.4,
+        "VERY_HIGH": 1.8
+    }
+    return multipliers.get(category, 1.0)
 
 # ================== State Discretization ==================
-# MAC Agent State: [CBR, SINR, beacon, mcs, neighbors] - 5D
-CBR_BINS = np.linspace(0.0, 1.0, 21)          # 20 bins for CBR
-SINR_BINS = np.linspace(0, 50, 11)            # 10 bins for SINR
-BEACON_BINS = np.arange(1, 21)                # Discrete beacon values 1-20
-MCS_BINS = np.arange(0, 10)                   # Discrete MCS values 0-9
-NEIGHBORS_BINS = np.linspace(0, 50, 11)       # 10 bins for neighbors
+CBR_BINS = np.linspace(0.0, 1.0, 21)
+SINR_BINS = np.linspace(0, 50, 11)
+BEACON_BINS = np.arange(1, 21)
+MCS_BINS = np.arange(0, 10)
+NEIGHBORS_BINS = np.linspace(0, 50, 11)
+POWER_BINS = np.arange(1, 31)
 
-# PHY Agent State: [CBR, SINR, power, neighbors] - 4D
-POWER_BINS = np.arange(1, 31)                 # Discrete power values 1-30
+MAC_STATE_DIM = (20, 10, 20, 10, 10)
+PHY_STATE_DIM = (20, 10, 30, 10)
 
-# State dimensions
-MAC_STATE_DIM = (20, 10, 20, 10, 10)  # CBR, SINR, beacon(1-20), MCS(0-9), neighbors
-PHY_STATE_DIM = (20, 10, 30, 10)      # CBR, SINR, power(1-30), neighbors
-
-# ================== Action Spaces (SAME AS BEFORE) ==================
-# MAC Agent Actions: [beacon_delta, mcs_delta]
+# ================== Action Spaces ==================
 MAC_ACTIONS = [
-    (0, 0),    # No change
-    (1, 0),    # Beacon +1
-    (-1, 0),   # Beacon -1
-    (2, 0),    # Beacon +2
-    (-2, 0),   # Beacon -2
-    (3, 0),    # Beacon +3
-    (-3, 0),   # Beacon -3
-    (5, 0),    # Beacon +5
-    (-5, 0),   # Beacon -5
-    (0, 1),    # MCS +1
-    (0, -1),   # MCS -1
-    (0, 2),    # MCS +2
-    (0, -2),   # MCS -2
-    (1, 1),    # Beacon +1, MCS +1
-    (1, -1),   # Beacon +1, MCS -1
-    (-1, 1),   # Beacon -1, MCS +1
-    (-1, -1),  # Beacon -1, MCS -1
-    (2, 1),    # Beacon +2, MCS +1
-    (-2, -1),  # Beacon -2, MCS -1
-    (10, 0),   # Beacon +10 (large jump)
-    (-10, 0),  # Beacon -10 (large jump)
-    (0, 5),    # MCS +5 (large jump)
-    (0, -5),   # MCS -5 (large jump)
+    (0, 0), (1, 0), (-1, 0), (2, 0), (-2, 0), (3, 0), (-3, 0), (5, 0), (-5, 0),
+    (0, 1), (0, -1), (0, 2), (0, -2), (1, 1), (1, -1), (-1, 1), (-1, -1),
+    (2, 1), (-2, -1), (10, 0), (-10, 0), (0, 5), (0, -5),
 ]
 
-# PHY Agent Actions: [power_delta]
-PHY_ACTIONS = [
-    0,    # No change
-    1,    # Power +1
-    -1,   # Power -1
-    2,    # Power +2
-    -2,   # Power -2
-    3,    # Power +3
-    -3,   # Power -3
-    5,    # Power +5
-    -5,   # Power -5
-    10,   # Power +10 (large jump)
-    -10,  # Power -10 (large jump)
-    15,   # Power +15 (very large jump)
-    -15,  # Power -15 (very large jump)
-]
+PHY_ACTIONS = [0, 1, -1, 2, -2, 3, -3, 5, -5, 10, -10, 15, -15]
 
 MAC_ACTION_DIM = len(MAC_ACTIONS)
 PHY_ACTION_DIM = len(PHY_ACTIONS)
 
-# Initialize Q-tables FIRST
+# Initialize Q-tables
 mac_q_table = np.zeros(MAC_STATE_DIM + (MAC_ACTION_DIM,), dtype=np.float32)
 phy_q_table = np.zeros(PHY_STATE_DIM + (PHY_ACTION_DIM,), dtype=np.float32)
 
-# ================== Logging Setup (MOVE TO AFTER Q-table initialization) ==================
+# ================== Logging Setup ==================
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 LOG_DEBUG_PATH = os.path.join(LOG_DIR, f'{MODEL_PREFIX}_debug.log')
 
-# Configure logging with UTF-8 encoding to prevent Unicode errors
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(levelname)s: %(message)s',
@@ -149,11 +170,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# NOW the logger can access the Q-tables safely
-logger.info("DUAL-AGENT Q-LEARNING INITIALIZED")
+logger.info("DUAL-AGENT Q-LEARNING - REVISED DENSITY SYSTEM")
+logger.info(f"CBR Target: {CBR_TARGET}")
+logger.info(f"SINR Target: {SINR_TARGET} dB (fixed)")
 logger.info(f"Antenna Type: {ANTENNA_TYPE}")
-logger.info(f"MAC Q-table shape: {mac_q_table.shape} (5D state -> 2D action)")
-logger.info(f"PHY Q-table shape: {phy_q_table.shape} (4D state -> 1D action)")
+logger.info("Density Categories: LOW(≤10/13), MEDIUM(≤20/26), HIGH(≤30/40), VERY_HIGH(>30/40)")
 
 # ================== Helper Functions ==================
 def discretize(value, bins):
@@ -161,104 +182,95 @@ def discretize(value, bins):
     if not np.isfinite(value):
         value = 0.0
     
-    # For discrete values (beacon, mcs, power), directly map to index
-    if len(bins) <= 30 and bins[0] == 1 and bins[-1] in [20, 30]:  # Beacon or Power
+    if len(bins) <= 30 and bins[0] == 1 and bins[-1] in [20, 30]:
         value = int(np.clip(value, bins[0], bins[-1]))
-        return value - bins[0]  # Convert to 0-based index
-    elif len(bins) == 10 and bins[0] == 0 and bins[-1] == 9:  # MCS
+        return value - bins[0]
+    elif len(bins) == 10 and bins[0] == 0 and bins[-1] == 9:
         value = int(np.clip(value, 0, 9))
         return value
-    else:  # Continuous values (CBR, SINR, neighbors)
-        value = np.clip(value, bins[0], bins[-1])
-        bin_idx = np.digitize(value, bins) - 1
-        return max(0, min(len(bins) - 2, bin_idx))
-
-# ================== Enhanced Helper Functions (REPLACE EXISTING) ==================
-# ================== Enhanced Helper Functions (REPLACE EXISTING) ==================
-def get_neighbor_category(neighbor_count, antenna_type="OMNIDIRECTIONAL"):
-    """Enhanced neighbor density categorization with internal antenna awareness"""
-    # Internal logic - doesn't change input/output interface
-    if antenna_type.upper() == "SECTORAL":
-        # Sectoral antennas can handle higher densities better
-        if neighbor_count <= 3:
-            return "VERY_LOW"
-        elif neighbor_count <= 8:
-            return "LOW"
-        elif neighbor_count <= 15:
-            return "MEDIUM"
-        elif neighbor_count <= 22:
-            return "HIGH"
-        elif neighbor_count <= 30:
-            return "VERY_HIGH"
-        else:
-            return "EXTREME"
     else:
-        # Original omnidirectional thresholds
-        if neighbor_count <= 2:
-            return "VERY_LOW"
-        elif neighbor_count <= 5:
-            return "LOW"
-        elif neighbor_count <= 10:
-            return "MEDIUM"
-        elif neighbor_count <= 15:
-            return "HIGH"
-        elif neighbor_count <= 20:
-            return "VERY_HIGH"
-        else:
-            return "EXTREME"
-
-def discretize(value, bins):
-    """Discretize a continuous value into a bin index - SAME AS ORIGINAL"""
-    if not np.isfinite(value):
-        value = 0.0
-    
-    # For discrete values (beacon, mcs, power), directly map to index
-    if len(bins) <= 30 and bins[0] == 1 and bins[-1] in [20, 30]:  # Beacon or Power
-        value = int(np.clip(value, bins[0], bins[-1]))
-        return value - bins[0]  # Convert to 0-based index
-    elif len(bins) == 10 and bins[0] == 0 and bins[-1] == 9:  # MCS
-        value = int(np.clip(value, 0, 9))
-        return value
-    else:  # Continuous values (CBR, SINR, neighbors)
         value = np.clip(value, bins[0], bins[-1])
         bin_idx = np.digitize(value, bins) - 1
         return max(0, min(len(bins) - 2, bin_idx))
-
-def get_density_multiplier(neighbor_count, antenna_type="OMNIDIRECTIONAL"):
-    """Get density-based multiplier for reward calculation"""
-    density_cat = get_neighbor_category(neighbor_count, antenna_type)
-    multipliers = {
-        "VERY_LOW": 0.5,
-        "LOW": 0.8, 
-        "MEDIUM": 1.0,
-        "HIGH": 1.3,
-        "VERY_HIGH": 1.6,
-        "EXTREME": 2.0
+    
+def get_optimal_parameters(neighbors, antenna_type="OMNIDIRECTIONAL"):
+    """
+    NEW HELPER FUNCTION: Calculate optimal parameters based on neighbor density
+    
+    Uses logarithmic scaling for smooth parameter adjustment
+    """
+    
+    # Logarithmic scaling factors
+    beacon_factor = 1.0 - (0.3 * math.log(1 + neighbors) / math.log(1 + 40))
+    mcs_factor = 1.0 - (0.4 * math.log(1 + neighbors) / math.log(1 + 50))
+    power_factor = 0.3 + (0.4 * math.log(1 + neighbors) / math.log(1 + 40))
+    
+    # Base parameters
+    optimal_beacon = 12.0 * beacon_factor
+    optimal_mcs = 8.0 * mcs_factor
+    optimal_power_norm = power_factor
+    
+    # Antenna adjustments
+    if antenna_type.upper() == "SECTORAL":
+        optimal_beacon *= 1.1      # 10% higher beacon
+        optimal_mcs *= 1.2         # 20% higher MCS
+        optimal_power_norm *= 0.8  # 20% lower power need
+    
+    return {
+        'beacon': optimal_beacon,
+        'mcs': optimal_mcs,
+        'power_norm': optimal_power_norm
     }
-    return multipliers.get(density_cat, 1.0)
 
-def analyze_antenna_efficiency(antenna_type, neighbors, cbr, sinr):
-    """Analyze antenna efficiency based on conditions"""
-    if antenna_type.upper() == "SECTORAL":
-        # Sectoral antennas should perform better in high density
-        if neighbors > 10:
-            efficiency_bonus = 0.2  # 20% bonus in high density
-            if cbr < 0.7 and sinr > 10:  # Good performance metrics
-                efficiency_bonus = 0.3
-        else:
-            efficiency_bonus = 0.1  # Small bonus in low density
-    else:
-        # Omnidirectional baseline
-        efficiency_bonus = 0.0
-        if neighbors <= 5:  # Omnidirectional might be better in very low density
-            efficiency_bonus = 0.1
+# ================== Enhanced SINR Reward Function ==================
+def calculate_sinr_reward(sinr, power_norm, neighbors, antenna_type="OMNIDIRECTIONAL"):
+    """
+    REPLACE THE EXISTING calculate_sinr_reward FUNCTION WITH THIS IMPROVED VERSION
     
-    return efficiency_bonus
+    Key improvements:
+    - Quadratic power penalty (much stronger deterrent)
+    - Logarithmic neighbor scaling (smoother than categorical)
+    - Maintains fixed SINR target and two-phase structure
+    """
+    SINR_TARGET = 12.0
+    
+    # Phase 1: Below target - aggressive improvement needed
+    if sinr < SINR_TARGET:
+        base_reward = 10.0 * (sinr / SINR_TARGET)
+        
+        # IMPROVED: Logarithmic neighbor penalty (smoother than categorical bins)
+        neighbor_penalty = -2.0 * math.log(1 + neighbors) / math.log(1 + 30)
+        sinr_reward = base_reward + neighbor_penalty
+        
+    else:
+        # Phase 2: Above target - diminishing returns
+        base_reward = 10.0
+        excess_sinr = sinr - SINR_TARGET
+        diminishing_reward = 5.0 * math.sqrt(excess_sinr / 10.0)
+        sinr_reward = base_reward + diminishing_reward
+        sinr_reward = min(sinr_reward, 18.0)
+    
+    # IMPROVED: Quadratic power penalty when SINR is sufficient
+    if sinr >= SINR_TARGET:
+        if power_norm > 0.6:
+            # Quadratic penalty grows MUCH faster than linear
+            power_penalty = -8.0 * ((power_norm - 0.6) ** 2)
+            sinr_reward += power_penalty
+        elif power_norm <= 0.4:
+            # Quadratic efficiency bonus
+            efficiency_bonus = 4.0 * ((0.4 - power_norm) ** 2)
+            sinr_reward += efficiency_bonus
+    
+    # IMPROVED: Logarithmic neighbor impact for excessive SINR
+    if sinr > 20.0:
+        neighbor_impact_penalty = -3.0 * math.log(1 + neighbors) / math.log(1 + 50) * (sinr - 20.0) / 10.0
+        sinr_reward += neighbor_impact_penalty
+    
+    return np.clip(sinr_reward, -15, 20)
 
-# ================== Separated Agent Classes ==================
-
+# ================== REVISED Agent Classes ==================
 class MACAgent:
-    """MAC Agent - Controls beacon rate and MCS with CBR focus"""
+    """MAC Agent with revised density awareness"""
     
     def __init__(self, epsilon=1.0):
         self.epsilon = epsilon
@@ -266,7 +278,6 @@ class MACAgent:
         self.state_visit_counts = defaultdict(int)
         
     def get_state_indices(self, cbr, sinr, beacon, mcs, neighbors):
-        """Convert continuous state to discrete indices"""
         cbr_idx = discretize(cbr, CBR_BINS)
         sinr_idx = discretize(sinr, SINR_BINS)
         beacon_idx = discretize(beacon, BEACON_BINS)
@@ -276,28 +287,24 @@ class MACAgent:
         return (cbr_idx, sinr_idx, beacon_idx, mcs_idx, neighbors_idx)
     
     def select_action(self, state_indices, neighbor_count, antenna_type="OMNIDIRECTIONAL"):
-        """Select action with internal antenna awareness but same interface"""
-        # Track state visits
+        """REVISED: Action selection using new density categories"""
         self.state_visit_counts[state_indices] += 1
         
-        # Internal density classification (doesn't change input)
         density_category = get_neighbor_category(neighbor_count, antenna_type)
         adaptive_epsilon = self.epsilon
         
-        # Internal antenna-aware exploration (doesn't change interface)
-        if antenna_type.upper() == "SECTORAL" and density_category in ["HIGH", "VERY_HIGH", "EXTREME"]:
-            adaptive_epsilon = min(1.0, self.epsilon * 1.3)  # More exploration for sectoral in high density
+        # Antenna and density-aware exploration adjustment
+        if antenna_type.upper() == "SECTORAL":
+            if density_category in ["HIGH", "VERY_HIGH"]:
+                adaptive_epsilon = min(1.0, self.epsilon * 1.2)  # More conservative
         
-        # Enhanced exploration for full discrete range coverage
         if random.random() < adaptive_epsilon:
-            # 20% chance for random jump to any discrete value (during high exploration)
+            # Random jump exploration
             if self.epsilon > 0.5 and random.random() < 0.2:
-                # Direct jump to random discrete values
-                if random.random() < 0.5:  # 50% chance to explore beacon
+                if random.random() < 0.5:  # Beacon exploration
                     target_beacon = random.randint(1, 20)
-                    current_beacon = state_indices[2] + 1  # Convert back from index
+                    current_beacon = state_indices[2] + 1
                     beacon_delta = target_beacon - current_beacon
-                    # Find closest action
                     best_action = 0
                     best_diff = float('inf')
                     for i, (b, m) in enumerate(MAC_ACTIONS):
@@ -305,11 +312,10 @@ class MACAgent:
                             best_diff = abs(b - beacon_delta)
                             best_action = i
                     return best_action
-                else:  # 50% chance to explore MCS
+                else:  # MCS exploration
                     target_mcs = random.randint(0, 9)
                     current_mcs = state_indices[3]
                     mcs_delta = target_mcs - current_mcs
-                    # Find closest action
                     best_action = 0
                     best_diff = float('inf')
                     for i, (b, m) in enumerate(MAC_ACTIONS):
@@ -318,108 +324,80 @@ class MACAgent:
                             best_action = i
                     return best_action
             
-            # Antenna-aware biased exploration (internal logic)
-            if antenna_type.upper() == "SECTORAL":
-                if density_category in ["HIGH", "VERY_HIGH", "EXTREME"]:
-                    # Sectoral antennas can be more aggressive in high density
-                    preferred_actions = [i for i, (b, m) in enumerate(MAC_ACTIONS) if b <= 1]
-                    if preferred_actions and random.random() < 0.8:
-                        return random.choice(preferred_actions)
-                elif density_category in ["VERY_LOW", "LOW"]:
-                    # Can use higher beacon rates with sectoral
-                    preferred_actions = [i for i, (b, m) in enumerate(MAC_ACTIONS) if b >= 0]
-                    if preferred_actions and random.random() < 0.7:
-                        return random.choice(preferred_actions)
-            else:
-                # Omnidirectional strategy (more conservative)
-                if density_category in ["HIGH", "VERY_HIGH", "EXTREME"]:
-                    preferred_actions = [i for i, (b, m) in enumerate(MAC_ACTIONS) if b <= 0]
-                    if preferred_actions and random.random() < 0.7:
-                        return random.choice(preferred_actions)
-                elif density_category in ["VERY_LOW", "LOW"]:
-                    preferred_actions = [i for i, (b, m) in enumerate(MAC_ACTIONS) if b >= 0]
-                    if preferred_actions and random.random() < 0.7:
-                        return random.choice(preferred_actions)
+            # Density-aware biased exploration
+            if density_category in ["HIGH", "VERY_HIGH"]:
+                # Conservative beacon actions in high density
+                preferred_actions = [i for i, (b, m) in enumerate(MAC_ACTIONS) if b <= 1]
+                if preferred_actions and random.random() < 0.8:
+                    return random.choice(preferred_actions)
+            elif density_category == "LOW":
+                # Can use higher beacon rates in low density
+                preferred_actions = [i for i, (b, m) in enumerate(MAC_ACTIONS) if b >= -1]
+                if preferred_actions and random.random() < 0.7:
+                    return random.choice(preferred_actions)
             
             return random.randint(0, MAC_ACTION_DIM - 1)
         else:
-            # Exploit
             return np.argmax(self.q_table[state_indices])
     
     def calculate_reward(self, cbr, sinr, beacon, mcs, neighbors, next_cbr, next_beacon, next_mcs, antenna_type="OMNIDIRECTIONAL"):
-        """MAC-specific reward with internal antenna awareness"""
-        # Primary: CBR optimization
-        cbr_error = abs(cbr - CBR_TARGET)
-        cbr_reward = 10.0 * (1 - math.tanh(20 * cbr_error))
+        """
+        REPLACE THE calculate_reward METHOD IN MACAgent CLASS WITH THIS
         
-        # Internal antenna-aware optimization (doesn't change interface)
-        density_category = get_neighbor_category(neighbors, antenna_type)
-        beacon_reward = 0.0
+        Improved mathematical formulations:
+        - Logarithmic neighbor scaling for beacon optimization
+        - Quadratic penalties for parameter deviations
+        - Smoother reward landscape
+        """
         
-        # Enhanced beacon reward based on antenna type (internal logic)
+        # Primary CBR optimization (keep existing formula - it's already good)
+        cbr_error = abs(cbr - 0.4)  # CBR_TARGET = 0.4
+        cbr_reward = 10.0 * (1 - math.tanh(25 * cbr_error))
+        
+        # IMPROVED: Beacon optimization with logarithmic neighbor scaling
+        # Optimal beacon rate decreases logarithmically with neighbor density
+        optimal_beacon_factor = 1.0 - (0.3 * math.log(1 + neighbors) / math.log(1 + 40))
+        optimal_beacon = 12.0 * optimal_beacon_factor  # Base beacon 12, scaled by density
+        
+        # Antenna awareness
         if antenna_type.upper() == "SECTORAL":
-            # Sectoral antennas can handle higher densities better
-            if density_category in ["HIGH", "VERY_HIGH", "EXTREME"]:
-                if beacon <= 6:  # More conservative for sectoral in high density
-                    beacon_reward = 4.0
-                elif beacon > 12:
-                    beacon_reward = -2.0
-            elif density_category in ["VERY_LOW", "LOW"]:
-                if beacon >= 10:  # Can use higher rates with sectoral
-                    beacon_reward = 3.0
-                elif beacon < 4:
-                    beacon_reward = -2.0
-        else:
-            # Original omnidirectional logic
-            if density_category in ["HIGH", "VERY_HIGH", "EXTREME"]:
-                if beacon <= 8:
-                    beacon_reward = 3.0
-                elif beacon > 15:
-                    beacon_reward = -3.0
-            elif density_category in ["VERY_LOW", "LOW"]:
-                if beacon >= 12:
-                    beacon_reward = 2.0
-                elif beacon < 5:
-                    beacon_reward = -2.0
+            optimal_beacon *= 1.1  # Sectoral can handle 10% higher beacon rates
         
-        # MCS efficiency reward with antenna awareness
-        mcs_reward = 0.0
+        # IMPROVED: Quadratic beacon penalty (stronger than linear)
+        beacon_error = abs(beacon - optimal_beacon)
+        beacon_reward = -2.0 * (beacon_error / 5.0) ** 2
+        
+        # IMPROVED: MCS optimization with logarithmic neighbor consideration
+        optimal_mcs_factor = 1.0 - (0.4 * math.log(1 + neighbors) / math.log(1 + 50))
+        optimal_mcs = 8.0 * optimal_mcs_factor  # Base MCS 8, reduced by density
+        
         if antenna_type.upper() == "SECTORAL":
-            # Sectoral can use higher MCS in high density due to better interference management
-            if density_category in ["HIGH", "VERY_HIGH", "EXTREME"] and mcs <= 5:
-                mcs_reward = 2.5
-            elif density_category in ["VERY_LOW", "LOW"] and mcs >= 6:
-                mcs_reward = 2.5
-        else:
-            # Original omnidirectional MCS logic
-            if density_category in ["HIGH", "VERY_HIGH", "EXTREME"] and mcs <= 4:
-                mcs_reward = 2.0
-            elif density_category in ["VERY_LOW", "LOW"] and mcs >= 6:
-                mcs_reward = 2.0
+            optimal_mcs *= 1.2  # Sectoral can handle 20% higher MCS
         
-        # Action smoothness penalty
+        # IMPROVED: Quadratic MCS penalty
+        mcs_error = abs(mcs - optimal_mcs)
+        mcs_reward = -1.5 * (mcs_error / 3.0) ** 2
+        
+        # IMPROVED: Logarithmic smoothness penalty (more forgiving than linear)
         beacon_change = abs(next_beacon - beacon)
         mcs_change = abs(next_mcs - mcs)
-        smoothness_penalty = -0.5 * (beacon_change + mcs_change)
+        smoothness_penalty = -1.0 * (math.log(1 + beacon_change) + math.log(1 + mcs_change))
         
         total_reward = cbr_reward + beacon_reward + mcs_reward + smoothness_penalty
         
         return np.clip(total_reward, -20, 20)
     
     def update_q_table(self, state_indices, action, reward, next_state_indices):
-        """Update Q-table using Q-learning rule - SAME AS ORIGINAL"""
         current_q = self.q_table[state_indices][action]
         max_next_q = np.max(self.q_table[next_state_indices])
         
         new_q = current_q + LEARNING_RATE * (reward + DISCOUNT_FACTOR * max_next_q - current_q)
         self.q_table[state_indices][action] = new_q
         
-        return new_q - current_q  # TD error
+        return new_q - current_q
 
-# ================== Enhanced PHY Agent==================
-# ================== Simplified PHY Agent (REPLACE EXISTING CLASS) ==================
 class PHYAgent:
-    """PHY Agent - Controls transmission power with SINR focus"""
+    """PHY Agent with revised density awareness"""
     
     def __init__(self, epsilon=1.0):
         self.epsilon = epsilon
@@ -427,7 +405,6 @@ class PHYAgent:
         self.state_visit_counts = defaultdict(int)
         
     def get_state_indices(self, cbr, sinr, power, neighbors):
-        """Convert continuous state to discrete indices - SAME AS ORIGINAL"""
         cbr_idx = discretize(cbr, CBR_BINS)
         sinr_idx = discretize(sinr, SINR_BINS)
         power_idx = discretize(power, POWER_BINS)
@@ -436,30 +413,26 @@ class PHYAgent:
         return (cbr_idx, sinr_idx, power_idx, neighbors_idx)
     
     def select_action(self, state_indices, neighbor_count, current_sinr, antenna_type="OMNIDIRECTIONAL"):
-        """Select action with internal antenna awareness but same interface"""
-        # Track state visits
+        """REVISED: PHY action selection with new density categories"""
         self.state_visit_counts[state_indices] += 1
         
-        # Internal antenna-aware adaptation
         density_category = get_neighbor_category(neighbor_count, antenna_type)
+        expected_min, expected_max = get_expected_sinr_range(neighbor_count, antenna_type)
+        
         adaptive_epsilon = self.epsilon
         
-        # Internal logic for antenna-specific exploration
-        if antenna_type.upper() == "SECTORAL":
-            if current_sinr < 8.0:  # Poor SINR with sectoral (can be more aggressive)
-                adaptive_epsilon = min(1.0, self.epsilon * 1.4)
-        else:
-            if current_sinr < 6.0:  # Poor SINR with omnidirectional
-                adaptive_epsilon = min(1.0, self.epsilon * 1.3)
+        # Adjust exploration based on SINR relative to expected range
+        if current_sinr < expected_min:
+            adaptive_epsilon = min(1.0, self.epsilon * 1.4)  # More exploration if below expected
+        elif current_sinr > expected_max:
+            adaptive_epsilon = max(0.1, self.epsilon * 0.8)  # Less exploration if above expected
         
         if random.random() < adaptive_epsilon:
-            # 20% chance for random jump to any discrete power value (during high exploration)
+            # Random jump exploration
             if self.epsilon > 0.5 and random.random() < 0.2:
-                # Direct jump to random discrete power
                 target_power = random.randint(1, 30)
-                current_power = state_indices[2] + 1  # Convert back from index
+                current_power = state_indices[2] + 1
                 power_delta = target_power - current_power
-                # Find closest action
                 best_action = 0
                 best_diff = float('inf')
                 for i, p in enumerate(PHY_ACTIONS):
@@ -468,101 +441,70 @@ class PHYAgent:
                         best_action = i
                 return best_action
             
-            # Internal antenna-aware biased exploration
-            if antenna_type.upper() == "SECTORAL":
-                # Sectoral can be more power-efficient
-                if density_category in ["HIGH", "VERY_HIGH", "EXTREME"] and current_sinr > 12:
-                    # Can reduce power more aggressively with sectoral
-                    preferred_actions = [i for i, p in enumerate(PHY_ACTIONS) if p <= -1]
-                    if preferred_actions and random.random() < 0.8:
-                        return random.choice(preferred_actions)
-                elif density_category in ["VERY_LOW", "LOW"] and current_sinr < 12:
-                    # Might need more power for coverage
-                    preferred_actions = [i for i, p in enumerate(PHY_ACTIONS) if p >= 1]
-                    if preferred_actions and random.random() < 0.7:
-                        return random.choice(preferred_actions)
-            else:
-                # Original omnidirectional strategy
-                if density_category in ["HIGH", "VERY_HIGH", "EXTREME"] and current_sinr > 10:
-                    preferred_actions = [i for i, p in enumerate(PHY_ACTIONS) if p <= 0]
-                    if preferred_actions and random.random() < 0.7:
-                        return random.choice(preferred_actions)
-                elif density_category in ["VERY_LOW", "LOW"] and current_sinr < 10:
-                    preferred_actions = [i for i, p in enumerate(PHY_ACTIONS) if p >= 0]
-                    if preferred_actions and random.random() < 0.7:
-                        return random.choice(preferred_actions)
+            # Density and SINR-aware biased exploration
+            if current_sinr < expected_min:
+                # Need more power
+                preferred_actions = [i for i, p in enumerate(PHY_ACTIONS) if p >= 1]
+                if preferred_actions and random.random() < 0.8:
+                    return random.choice(preferred_actions)
+            elif current_sinr > expected_max and density_category in ["HIGH", "VERY_HIGH"]:
+                # Can reduce power in high density
+                preferred_actions = [i for i, p in enumerate(PHY_ACTIONS) if p <= -1]
+                if preferred_actions and random.random() < 0.8:
+                    return random.choice(preferred_actions)
             
             return random.randint(0, PHY_ACTION_DIM - 1)
         else:
-            # Exploit
             return np.argmax(self.q_table[state_indices])
     
     def calculate_reward(self, cbr, sinr, power, neighbors, next_sinr, next_power, antenna_type="OMNIDIRECTIONAL"):
-        """PHY-specific reward with internal antenna awareness"""
-        # Adaptive SINR target based on antenna type (internal logic)
+        """
+        REPLACE THE calculate_reward METHOD IN PHYAgent CLASS WITH THIS
+        
+        Uses improved SINR reward function and better power efficiency formulations
+        """
+        
+        # Primary: Use improved SINR reward function
+        power_norm = (power - 1) / (30 - 1)  # Assuming POWER_MIN=1, POWER_MAX=30
+        sinr_reward = calculate_sinr_reward(sinr, power_norm, neighbors, antenna_type)
+        
+        # IMPROVED: Power efficiency with logarithmic neighbor consideration
+        # Optimal power depends logarithmically on neighbor density
+        base_power_need = 0.3 + (0.4 * math.log(1 + neighbors) / math.log(1 + 40))  # 0.3 to 0.7
+        
         if antenna_type.upper() == "SECTORAL":
-            # Sectoral antennas can achieve better SINR performance
-            base_sinr_target = 15.0 - (neighbors / 12) * 4.0  # Better performance in high density
+            base_power_need *= 0.8  # Sectoral needs 20% less power
+        
+        # IMPROVED: Quadratic power efficiency reward/penalty
+        power_deviation = power_norm - base_power_need
+        
+        if abs(power_deviation) <= 0.1:  # Within optimal range
+            power_efficiency_reward = 3.0
         else:
-            # Original omnidirectional target
-            base_sinr_target = 14.0 - (neighbors / 10) * 4.0
+            # Quadratic penalty for deviation from optimal
+            power_efficiency_reward = -4.0 * (power_deviation ** 2)
         
-        sinr_target = max(8.0, base_sinr_target)  # Minimum reasonable target
+        # IMPROVED: Logarithmic neighbor impact penalty
+        if power_norm > 0.7:
+            neighbor_impact_penalty = -2.0 * math.log(1 + neighbors) / math.log(1 + 30) * (power_norm - 0.7) ** 2
+            power_efficiency_reward += neighbor_impact_penalty
         
-        # SINR optimization reward
-        sinr_reward = 8.0 * math.tanh((sinr - sinr_target) / 5.0)
-        
-        # Power efficiency reward with antenna awareness
-        power_norm = (power - POWER_MIN) / (POWER_MAX - POWER_MIN)
-        density_category = get_neighbor_category(neighbors, antenna_type)
-        
-        power_reward = 0.0
-        if antenna_type.upper() == "SECTORAL":
-            # Sectoral antennas can be more power efficient
-            if density_category in ["HIGH", "VERY_HIGH", "EXTREME"]:
-                if power_norm <= 0.4:  # Very efficient with sectoral
-                    power_reward = 5.0
-                elif power_norm > 0.8:
-                    power_reward = -2.0
-            elif density_category in ["VERY_LOW", "LOW"]:
-                if 0.3 <= power_norm <= 0.7:
-                    power_reward = 3.0
-                elif power_norm < 0.2:
-                    power_reward = -1.0
-        else:
-            # Original omnidirectional efficiency logic
-            if density_category in ["HIGH", "VERY_HIGH", "EXTREME"]:
-                if power_norm <= 0.5:
-                    power_reward = 4.0
-                elif power_norm > 0.8:
-                    power_reward = -2.0
-            elif density_category in ["VERY_LOW", "LOW"]:
-                if 0.3 <= power_norm <= 0.8:
-                    power_reward = 2.0
-                elif power_norm < 0.2:
-                    power_reward = -1.0
-        
-        # SINR-power efficiency bonus
-        if next_sinr >= 12.0 and power_norm <= 0.6:
-            power_reward += 3.0  # Bonus for efficient operation
-        
-        # Action smoothness
+        # IMPROVED: Logarithmic smoothness penalty
         power_change = abs(next_power - power)
-        smoothness_penalty = -0.3 * power_change
+        smoothness_penalty = -0.5 * math.log(1 + power_change)
         
-        total_reward = sinr_reward + power_reward + smoothness_penalty
+        total_reward = sinr_reward + power_efficiency_reward + smoothness_penalty
         
         return np.clip(total_reward, -20, 20)
     
     def update_q_table(self, state_indices, action, reward, next_state_indices):
-        """Update Q-table using Q-learning rule - SAME AS ORIGINAL"""
         current_q = self.q_table[state_indices][action]
         max_next_q = np.max(self.q_table[next_state_indices])
         
         new_q = current_q + LEARNING_RATE * (reward + DISCOUNT_FACTOR * max_next_q - current_q)
         self.q_table[state_indices][action] = new_q
         
-        return new_q - current_q  # TD error
+        return new_q - current_q
 
 # ================== Centralized Learning Manager ==================
 class CentralizedLearningManager:
@@ -586,28 +528,24 @@ class CentralizedLearningManager:
     
     def perform_batch_update(self):
         """Perform batch Q-learning updates"""
-        # Sample batch from buffer
         batch = random.sample(self.experience_buffer, self.batch_size)
         
         mac_td_errors = []
         phy_td_errors = []
         
         for exp in batch:
-            # Update MAC agent
             mac_td = self.mac_agent.update_q_table(
                 exp['mac_state'], exp['mac_action'], 
                 exp['mac_reward'], exp['next_mac_state']
             )
             mac_td_errors.append(abs(mac_td))
             
-            # Update PHY agent
             phy_td = self.phy_agent.update_q_table(
                 exp['phy_state'], exp['phy_action'],
                 exp['phy_reward'], exp['next_phy_state']
             )
             phy_td_errors.append(abs(phy_td))
         
-        # Log average TD errors
         if self.update_counter % 100 == 0:
             logger.info(f"Batch update {self.update_counter//self.batch_size}: "
                        f"MAC TD error: {np.mean(mac_td_errors):.4f}, "
@@ -659,11 +597,14 @@ class DualAgentPerformanceMetrics:
             'avg_cbr': np.mean(self.cbr_values),
             'cbr_in_range_rate': sum(1 for cbr in self.cbr_values if CBR_RANGE[0] <= cbr <= CBR_RANGE[1]) / len(self.cbr_values),
             'avg_sinr': np.mean(self.sinr_values),
-            'sinr_above_10_rate': sum(1 for sinr in self.sinr_values if sinr >= 10) / len(self.sinr_values),
+            'sinr_above_12_rate': sum(1 for sinr in self.sinr_values if sinr >= 12) / len(self.sinr_values),
             
-            # Density analysis
+            # Density analysis with revised categories
             'avg_neighbors': np.mean(self.neighbor_counts),
-            'high_density_rate': sum(1 for n in self.neighbor_counts if n > 8) / len(self.neighbor_counts),
+            'low_density_rate': sum(1 for n in self.neighbor_counts if get_neighbor_category(n, ANTENNA_TYPE) == "LOW") / len(self.neighbor_counts),
+            'medium_density_rate': sum(1 for n in self.neighbor_counts if get_neighbor_category(n, ANTENNA_TYPE) == "MEDIUM") / len(self.neighbor_counts),
+            'high_density_rate': sum(1 for n in self.neighbor_counts if get_neighbor_category(n, ANTENNA_TYPE) == "HIGH") / len(self.neighbor_counts),
+            'very_high_density_rate': sum(1 for n in self.neighbor_counts if get_neighbor_category(n, ANTENNA_TYPE) == "VERY_HIGH") / len(self.neighbor_counts),
             
             # Action diversity
             'mac_action_entropy': entropy(np.bincount(self.mac_actions, minlength=MAC_ACTION_DIM)),
@@ -686,26 +627,29 @@ class DualAgentPerformanceMetrics:
         """Save performance data to Excel"""
         try:
             with pd.ExcelWriter(PERFORMANCE_LOG_PATH, engine='openpyxl', mode='w') as writer:
-                # Episode summary
                 if self.episode_data:
                     episode_df = pd.DataFrame(self.episode_data)
                     episode_df.to_excel(writer, sheet_name='Episode_Summary', index=False)
                 
-                # Dual agent analysis
+                # Revised density analysis
                 analysis_data = {
                     'Metric': ['MAC Avg Reward', 'PHY Avg Reward', 'Joint Avg Reward',
-                               'CBR Performance', 'SINR Performance', 'High Density Adaptation'],
+                               'CBR Performance', 'SINR Performance', 'Low Density Rate',
+                               'Medium Density Rate', 'High Density Rate', 'Very High Density Rate'],
                     'Value': [
                         np.mean([d['avg_mac_reward'] for d in self.episode_data[-10:]]),
                         np.mean([d['avg_phy_reward'] for d in self.episode_data[-10:]]),
                         np.mean([d['avg_joint_reward'] for d in self.episode_data[-10:]]),
                         np.mean([d['cbr_in_range_rate'] for d in self.episode_data[-10:]]),
-                        np.mean([d['sinr_above_10_rate'] for d in self.episode_data[-10:]]),
-                        np.mean([d['high_density_rate'] for d in self.episode_data[-10:]])
+                        np.mean([d['sinr_above_12_rate'] for d in self.episode_data[-10:]]),
+                        np.mean([d['low_density_rate'] for d in self.episode_data[-10:]]),
+                        np.mean([d['medium_density_rate'] for d in self.episode_data[-10:]]),
+                        np.mean([d['high_density_rate'] for d in self.episode_data[-10:]]),
+                        np.mean([d['very_high_density_rate'] for d in self.episode_data[-10:]])
                     ]
                 }
                 analysis_df = pd.DataFrame(analysis_data)
-                analysis_df.to_excel(writer, sheet_name='Dual_Agent_Analysis', index=False)
+                analysis_df.to_excel(writer, sheet_name='Density_Analysis', index=False)
                 
             logger.info(f"Performance data saved to {PERFORMANCE_LOG_PATH}")
             
@@ -713,7 +657,6 @@ class DualAgentPerformanceMetrics:
             logger.error(f"Error saving to Excel: {e}")
 
 # ================== Dual-Agent Q-Learning Implementation ==================
-# ================== Dual-Agent Q-Learning Implementation (REPLACE ENTIRE CLASS) ==================
 class DualAgentQLearning:
     def __init__(self, training_mode=True):
         self.training_mode = training_mode
@@ -723,24 +666,22 @@ class DualAgentQLearning:
         self.performance = DualAgentPerformanceMetrics()
         self.episode_count = 0
         
-        # Load pre-trained models if they exist
         self.load_models()
     
     def process_vehicle(self, veh_id, veh_info):
-        """Process vehicle with same input/output interface as original Q-learning"""
+        """Process vehicle with revised density categorization"""
         try:
-            # Extract current state - SAME AS ORIGINAL Q-LEARNING
-            cbr = float(veh_info.get("CBR", 0.65))
+            # Extract current state
+            cbr = float(veh_info.get("CBR", 0.4))
             sinr = float(veh_info.get("SINR", veh_info.get("SNR", 20)))
-            neighbors = int(veh_info.get("neighbors", 5))
-            current_power = float(veh_info.get("transmissionPower", 15))  # Same as original
+            neighbors = int(veh_info.get("neighbors", 10))
+            current_power = float(veh_info.get("transmissionPower", 15))
             current_beacon = float(veh_info.get("beaconRate", 10))
             current_mcs = int(veh_info.get("MCS", 5))
             
-            # Use the configured antenna type (no changes needed to VANET script)
-            antenna_type = ANTENNA_TYPE  # From configuration
+            antenna_type = ANTENNA_TYPE
             
-            # Validate and clamp inputs - SAME AS ORIGINAL
+            # Validate and clamp inputs
             current_power = np.clip(current_power, POWER_MIN, POWER_MAX)
             current_beacon = np.clip(current_beacon, BEACON_MIN, BEACON_MAX)
             current_mcs = np.clip(current_mcs, 0, 9)
@@ -748,36 +689,26 @@ class DualAgentQLearning:
             sinr = np.clip(sinr, 0, 50)
             neighbors = max(0, neighbors)
             
-            # Handle NaN values - SAME AS ORIGINAL
+            # Handle NaN values
             if not np.isfinite(cbr):
-                cbr = 0.65
+                cbr = 0.4
             if not np.isfinite(sinr):
-                sinr = 20.0
+                sinr = 15.0
             if not np.isfinite(current_power):
                 current_power = 15.0
             if not np.isfinite(current_beacon):
                 current_beacon = 10.0
             
-            # Special handling for sectoral antenna power
-            # If sectoral, treat transmissionPower as composite of front+rear
-            if antenna_type == "SECTORAL":
-                # Assume transmissionPower is the total/average power for sectoral
-                # This allows the same interface while optimizing for sectoral characteristics
-                effective_power = current_power  # Use as-is, but optimize knowing it's sectoral
-            else:
-                effective_power = current_power
-            
-            # Get MAC state indices
+            # Get state indices
             mac_state_indices = self.mac_agent.get_state_indices(
                 cbr, sinr, current_beacon, current_mcs, neighbors
             )
             
-            # Get PHY state indices
             phy_state_indices = self.phy_agent.get_state_indices(
-                cbr, sinr, effective_power, neighbors
+                cbr, sinr, current_power, neighbors
             )
             
-            # Select actions with configured antenna awareness
+            # Select actions with revised density awareness
             mac_action_idx = self.mac_agent.select_action(mac_state_indices, neighbors, antenna_type)
             phy_action_idx = self.phy_agent.select_action(phy_state_indices, neighbors, sinr, antenna_type)
             
@@ -787,27 +718,24 @@ class DualAgentQLearning:
             
             new_beacon = np.clip(current_beacon + beacon_delta, BEACON_MIN, BEACON_MAX)
             new_mcs = np.clip(current_mcs + mcs_delta, 0, 9)
-            new_power = np.clip(effective_power + power_delta, POWER_MIN, POWER_MAX)
+            new_power = np.clip(current_power + power_delta, POWER_MIN, POWER_MAX)
             
             # Training updates
             if self.training_mode:
-                # Simulate next state
                 next_cbr = cbr + random.uniform(-0.05, 0.05)
                 next_cbr = np.clip(next_cbr, 0, 1)
                 next_sinr = sinr + random.uniform(-2, 2)
                 
-                # Calculate rewards with antenna awareness
                 mac_reward = self.mac_agent.calculate_reward(
                     cbr, sinr, current_beacon, current_mcs, neighbors,
                     next_cbr, new_beacon, new_mcs, antenna_type
                 )
                 
                 phy_reward = self.phy_agent.calculate_reward(
-                    cbr, sinr, effective_power, neighbors,
+                    cbr, sinr, current_power, neighbors,
                     next_sinr, new_power, antenna_type
                 )
                 
-                # Get next state indices
                 next_mac_state = self.mac_agent.get_state_indices(
                     next_cbr, next_sinr, new_beacon, new_mcs, neighbors
                 )
@@ -815,7 +743,6 @@ class DualAgentQLearning:
                     next_cbr, next_sinr, new_power, neighbors
                 )
                 
-                # Store experience
                 experience = {
                     'mac_state': mac_state_indices,
                     'mac_action': mac_action_idx,
@@ -833,20 +760,20 @@ class DualAgentQLearning:
                     mac_action_idx, phy_action_idx
                 )
                 
-                # Decay exploration
                 self.mac_agent.epsilon = max(MIN_EPSILON, self.mac_agent.epsilon * EPSILON_DECAY)
                 self.phy_agent.epsilon = max(MIN_EPSILON, self.phy_agent.epsilon * EPSILON_DECAY)
             
-            # Enhanced logging with antenna type info
-            if veh_id.endswith('0'):  # Log every 10th vehicle
+            # Enhanced logging with revised density categories
+            if veh_id.endswith('0'):
                 density_cat = get_neighbor_category(neighbors, antenna_type)
+                expected_sinr = get_expected_sinr_range(neighbors, antenna_type)
                 logger.info(f"Vehicle {veh_id} [{antenna_type}][{density_cat}]: "
                            f"CBR={cbr:.3f}, SINR={sinr:.1f}dB, Neighbors={neighbors}")
+                logger.info(f"  Expected SINR range: {expected_sinr[0]}-{expected_sinr[1]} dB")
                 logger.info(f"  MAC: Beacon {current_beacon:.0f}->{new_beacon:.0f}Hz, "
                            f"MCS {current_mcs}->{new_mcs}")
-                logger.info(f"  PHY: Power {effective_power:.0f}->{new_power:.0f}dBm")
+                logger.info(f"  PHY: Power {current_power:.0f}->{new_power:.0f}dBm")
             
-            # Return EXACT SAME FORMAT as original Q-learning
             return {
                 "transmissionPower": int(new_power),
                 "beaconRate": int(new_beacon),
@@ -920,7 +847,6 @@ class DualAgentRLServer:
         logger.info(f"Dual-Agent RL Server started in {mode_str} mode on {host}:{port}")
 
     def receive_message_with_header(self, conn):
-        """Receive message with 4-byte length header"""
         try:
             header_data = b''
             while len(header_data) < 4:
@@ -945,7 +871,6 @@ class DualAgentRLServer:
             return None
 
     def send_message_with_header(self, conn, message):
-        """Send message with 4-byte length header"""
         try:
             message_bytes = message.encode('utf-8')
             message_length = len(message_bytes)
@@ -960,7 +885,6 @@ class DualAgentRLServer:
             return False
 
     def handle_client(self, conn, addr):
-        """Handle client connection"""
         logger.info(f"Client connected from {addr}")
         
         try:
@@ -988,7 +912,6 @@ class DualAgentRLServer:
                     else:
                         break
                     
-                    # End episode periodically during training
                     if self.training_mode and len(self.dual_agent.performance.mac_rewards) >= 100:
                         self.dual_agent.end_episode()
                 
@@ -1009,7 +932,6 @@ class DualAgentRLServer:
             logger.info(f"Client {addr} disconnected")
 
     def start(self):
-        """Start the server"""
         try:
             logger.info("Dual-Agent RL Server listening for connections...")
             while self.running:
@@ -1031,7 +953,6 @@ class DualAgentRLServer:
             self.stop()
     
     def stop(self):
-        """Stop the server"""
         logger.info("Stopping Dual-Agent RL server...")
         self.running = False
         
@@ -1047,15 +968,11 @@ class DualAgentRLServer:
         
         logger.info("Dual-Agent RL server stopped")
 
-# ================== Main Execution ==================
-# ================== Main Execution (REPLACE THE main() FUNCTION) ==================
 def main():
-    # Validate operation mode
     if OPERATION_MODE.upper() not in ["TRAINING", "TESTING"]:
         print(f"ERROR: Invalid OPERATION_MODE '{OPERATION_MODE}'. Must be 'TRAINING' or 'TESTING'")
         sys.exit(1)
     
-    # Validate antenna type
     if ANTENNA_TYPE.upper() not in ["SECTORAL", "OMNIDIRECTIONAL"]:
         print(f"ERROR: Invalid ANTENNA_TYPE '{ANTENNA_TYPE}'. Must be 'SECTORAL' or 'OMNIDIRECTIONAL'")
         sys.exit(1)
@@ -1063,41 +980,40 @@ def main():
     training_mode = (OPERATION_MODE.upper() == "TRAINING")
     
     print("="*80)
-    print(" DUAL-AGENT Q-LEARNING VANET SERVER")
+    print(" DUAL-AGENT Q-LEARNING - REVISED DENSITY SYSTEM")
     print(f"Host: {HOST}:{PORT}")
     print(f"Mode: {OPERATION_MODE.upper()}")
     print(f"Antenna Type: {ANTENNA_TYPE.upper()}")
-    print(f"Target CBR: {CBR_TARGET}")
-    print("Architecture:")
-    print("  • MAC Agent: Controls beacon rate & MCS (CBR-focused)")
-    print("  • PHY Agent: Controls transmission power (SINR-focused)")
-    print("  • Antenna-aware optimization")
-    print("  • Centralized learning manager")
-    print("Discrete Parameter Ranges:")
-    print("  • Power: 1-30 dBm (30 discrete values)")
-    print("  • Beacon Rate: 1-20 Hz (20 discrete values)")
-    print("  • MCS: 0-9 (10 discrete values)")
-    print("Enhanced Features:")
-    print("  • Large action jumps (±10, ±15) for full range coverage")
-    print("  • Random jumps to any discrete value during high exploration")
-    print("  • Antenna-aware biased exploration")
-    print("  • Density-aware neighbor classification")
+    print("="*40)
+    print("REVISED DENSITY CATEGORIES (Evidence-based):")
+    
     if ANTENNA_TYPE.upper() == "SECTORAL":
-        print("  • Sectoral antenna optimizations:")
-        print("    - Better high-density performance")
-        print("    - More power-efficient operation")
-        print("    - Enhanced interference management")
+        print("  • LOW: ≤13 neighbors (Expected SINR: 18-35 dB)")
+        print("  • MEDIUM: ≤26 neighbors (Expected SINR: 11-25 dB)")
+        print("  • HIGH: ≤40 neighbors (Expected SINR: 5-17 dB)")
+        print("  • VERY_HIGH: >40 neighbors (Expected SINR: -2 to 13 dB)")
     else:
-        print("  • Omnidirectional antenna optimizations:")
-        print("    - Balanced coverage optimization")
-        print("    - Conservative power management")
-    if training_mode:
-        print(f"Learning Rate: {LEARNING_RATE}")
-        print(f"Initial Epsilon: {EPSILON}")
-        print(f"Models will be saved every {MODEL_SAVE_INTERVAL} episodes")
-    else:
-        print("Using pre-trained models")
-    print(f"Model files: {MAC_MODEL_PATH}, {PHY_MODEL_PATH}")
+        print("  • LOW: ≤10 neighbors (Expected SINR: 15-30 dB)")
+        print("  • MEDIUM: ≤20 neighbors (Expected SINR: 8-20 dB)")
+        print("  • HIGH: ≤30 neighbors (Expected SINR: 2-12 dB)")
+        print("  • VERY_HIGH: >30 neighbors (Expected SINR: -5 to 8 dB)")
+    
+    print("="*40)
+    print("SCIENTIFIC IMPROVEMENTS:")
+    print("  ✓ Aligned with VANET research evidence")
+    print("  ✓ Expected SINR ranges for each density")
+    print("  ✓ Antenna-aware thresholds (sectoral +20-30%)")
+    print("  ✓ Simplified 4-category system")
+    print("  ✓ Performance-driven categorization")
+    print("="*40)
+    print(f"CBR Target: {CBR_TARGET} (optimized for latency/PDR)")
+    print(f"SINR Target: {SINR_TARGET} dB (fixed)")
+    print("="*40)
+    print("REWARD STRUCTURE:")
+    print("CBR: 10.0 * (1 - tanh(25 * |cbr - 0.4|))")
+    print("SINR: Two-phase with diminishing returns after 12 dB")
+    print("  - Phase 1 (SINR < 12): Linear growth")
+    print("  - Phase 2 (SINR ≥ 12): Diminishing + power efficiency")
     print("="*80)
     
     # Initialize server
