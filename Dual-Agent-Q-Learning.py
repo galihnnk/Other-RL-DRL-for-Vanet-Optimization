@@ -1,5 +1,5 @@
 """
-REVISED DUAL-AGENT Q-LEARNING WITH SCIENTIFIC DENSITY CATEGORIZATION
+DUAL-AGENT Q-LEARNING WITH SCIENTIFIC DENSITY CATEGORIZATION by Galih Nugraha Nurkahfi, galih.nugraha.nurkahfi@brin.go.id
 ===================================================================
 
 Updated to align with VANET system's evidence-based density categories
@@ -1028,3 +1028,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
