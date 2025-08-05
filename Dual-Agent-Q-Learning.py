@@ -1,9 +1,6 @@
 """
 DUAL-AGENT Q-LEARNING WITH SCIENTIFIC DENSITY CATEGORIZATION by Galih Nugraha Nurkahfi, galih.nugraha.nurkahfi@brin.go.id
-===================================================================
-
-Updated to align with VANET system's evidence-based density categories
-while maintaining antenna awareness through performance expectations.
+=========================================================================================================================
 """
 
 import socket
@@ -1028,4 +1025,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
