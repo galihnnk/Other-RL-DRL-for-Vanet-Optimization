@@ -9,7 +9,8 @@ CBR values are constant (received from simulation, not adjusted).
 QUICK START:
 1. For TRAINING: Set OPERATION_MODE = "TRAINING" below
 2. For TESTING: Set OPERATION_MODE = "TESTING" below  
-3. Run: python qlearning_power_mcs_server.py
+3. Configure CBR settings in the CONFIGURATION section
+4. Run: python qlearning_power_mcs_server.py
 
 CRITICAL FIXES:
 - Reward function PROPERLY targets CBR = 0.65
@@ -38,13 +39,40 @@ import pandas as pd
 from scipy.stats import entropy
 import sys
 
-# ================== CONFIGURATION ==================
+# ================== MAIN CONFIGURATION ==================
 # CHANGE THIS TO SWITCH BETWEEN MODES
 OPERATION_MODE = "TRAINING"        # Options: "TRAINING" or "TESTING"
 
-# ================== Constants ==================
-CBR_TARGET = 0.65                  # Target CBR for optimal performance
-CBR_RANGE = (0.6, 0.7)             # Acceptable CBR range
+# ================== CBR CONFIGURATION ==================
+#  MAIN CBR SETTINGS - Change these to adjust CBR behavior
+CBR_TARGET = 0.40                 #  Primary target CBR (0.0 to 1.0)
+CBR_TOLERANCE = 0.05              # ±tolerance around target for acceptable range
+CBR_EXTREME_HIGH = 0.9            # CBR above this gets massive penalties
+CBR_HIGH_WARNING = 0.8            # CBR above this gets high penalties  
+CBR_EXTREME_LOW = 0.3             # CBR below this gets penalties
+CBR_WIDE_ACCEPTABLE_TOLERANCE = 0.1  # Wider acceptable range for partial rewards
+
+# Automatically calculated CBR ranges (don't change these)
+CBR_RANGE = (CBR_TARGET - CBR_TOLERANCE, CBR_TARGET + CBR_TOLERANCE)
+CBR_WIDE_RANGE = (CBR_TARGET - CBR_WIDE_ACCEPTABLE_TOLERANCE, CBR_TARGET + CBR_WIDE_ACCEPTABLE_TOLERANCE)
+
+# File naming based on CBR target (automatically generated)
+CBR_TARGET_STR = f"{CBR_TARGET:.2f}".replace('.', '_')
+MODEL_SAVE_PATH = f'q_learning_power_mcs_model_{CBR_TARGET_STR}.npy'
+PERFORMANCE_LOG_PATH = f'performance_results_power_mcs_{CBR_TARGET_STR}.xlsx'
+
+# ================== REWARD FUNCTION CONFIGURATION ==================
+REWARD_DISTANCE_SCALE = 200       # Scale factor for distance-from-target reward
+REWARD_TARGET_ZONE = 50           # Bonus for being in target CBR range
+REWARD_WIDE_ZONE = 20             # Bonus for being in wider acceptable range
+REWARD_EXTREME_HIGH_PENALTY = 200 # Penalty multiplier for extreme high CBR
+REWARD_HIGH_PENALTY = 100         # Penalty multiplier for high CBR
+REWARD_LOW_PENALTY = 50           # Penalty multiplier for low CBR
+REWARD_STABILITY_SCALE = 0.5      # Scale factor for stability penalty
+REWARD_EFFICIENCY_SCALE = 0.2     # Scale factor for efficiency reward
+REWARD_MCS_SNR_PENALTY = 10       # Penalty for inappropriate MCS for SNR
+
+# ================== OTHER CONSTANTS ==================
 BUFFER_SIZE = 100000               # Replay buffer size
 LEARNING_RATE = 0.15               # Slightly higher learning rate
 DISCOUNT_FACTOR = 0.95             # Slightly lower discount for faster learning
@@ -60,9 +88,7 @@ POWER_MAX = 30                     # Maximum power (dBm)
 MCS_MIN = 0                        # Minimum MCS level
 MCS_MAX = 9                        # Maximum MCS level (IEEE 802.11bd)
 
-# File paths
-MODEL_SAVE_PATH = 'q_learning_power_mcs_model.npy'  # Power+MCS model name
-PERFORMANCE_LOG_PATH = 'performance_results_power_mcs.xlsx'
+# Intervals
 MODEL_SAVE_INTERVAL = 50           # Save model every N episodes
 PERFORMANCE_LOG_INTERVAL = 10      # Log performance every N episodes
 
@@ -131,6 +157,7 @@ LOG_DEBUG_PATH = os.path.join(LOG_DIR, 'debug.log')
 print(f" CBR-CENTERED Q-LEARNING (POWER+MCS): Q-table shape: {q_table.shape}")
 print(f" CBR-CENTERED Q-LEARNING (POWER+MCS): State dimensions: CBR={CBR_STATES}, Neighbors={NEIGHBORS_STATES}, SNR={SNR_STATES}, Power={POWER_STATES}, MCS={MCS_STATES}")
 print(f" CBR-CENTERED Q-LEARNING (POWER+MCS): Target CBR = {CBR_TARGET}")
+print(f" CBR-CENTERED Q-LEARNING (POWER+MCS): CBR Range = {CBR_RANGE} (tolerance = ±{CBR_TOLERANCE})")
 print(f" CBR-CENTERED Q-LEARNING (POWER+MCS): Adjusting Power (1-30 dBm) and MCS (0-9)")
 
 # ================== Helper Functions ==================
@@ -437,7 +464,7 @@ class QLearningAgent:
             log_message("WARNING: Testing mode but no pre-trained model found!", print_stdout=True)
     
     def calculate_reward(self, current_state, next_state):
-        """FIXED: Proper CBR-centered reward function"""
+        """FIXED: Configurable CBR-centered reward function"""
         try:
             # CBR values (read-only from simulation)
             current_cbr = float(np.real(current_state[2]))
@@ -454,47 +481,45 @@ class QLearningAgent:
             next_power = np.clip(next_power, POWER_MIN, POWER_MAX)
             next_mcs = np.clip(next_mcs, MCS_MIN, MCS_MAX)
             
-            # FIXED: CBR-centered reward calculation
-            
             # 1. Distance from target reward (primary component)
             current_distance = abs(current_cbr - CBR_TARGET)
             next_distance = abs(next_cbr - CBR_TARGET)
             distance_improvement = current_distance - next_distance
-            distance_reward = distance_improvement * 200  # Scale up the reward
+            distance_reward = distance_improvement * REWARD_DISTANCE_SCALE
             
             # 2. Target zone reward (being in the sweet spot)
             if CBR_RANGE[0] <= next_cbr <= CBR_RANGE[1]:
-                target_zone_reward = 50  # Big bonus for being in target range
-            elif 0.55 <= next_cbr <= 0.75:  # Wider acceptable range
-                target_zone_reward = 20
+                target_zone_reward = REWARD_TARGET_ZONE  # Perfect target range
+            elif CBR_WIDE_RANGE[0] <= next_cbr <= CBR_WIDE_RANGE[1]:
+                target_zone_reward = REWARD_WIDE_ZONE  # Wider acceptable range
             else:
                 target_zone_reward = 0
             
             # 3. Extreme CBR penalties (catastrophic failure cases)
             extreme_penalty = 0
-            if next_cbr > 0.9:  # Catastrophic high CBR (like 0.995)
-                extreme_penalty = -200 * (next_cbr - 0.9)  # Massive penalty
-            elif next_cbr > 0.8:  # High CBR
-                extreme_penalty = -100 * (next_cbr - 0.8)
-            elif next_cbr < 0.3:  # Too low CBR (network underutilized)
-                extreme_penalty = -50 * (0.3 - next_cbr)
+            if next_cbr > CBR_EXTREME_HIGH:  # Catastrophic high CBR
+                extreme_penalty = -REWARD_EXTREME_HIGH_PENALTY * (next_cbr - CBR_EXTREME_HIGH)
+            elif next_cbr > CBR_HIGH_WARNING:  # High CBR
+                extreme_penalty = -REWARD_HIGH_PENALTY * (next_cbr - CBR_HIGH_WARNING)
+            elif next_cbr < CBR_EXTREME_LOW:  # Too low CBR (network underutilized)
+                extreme_penalty = -REWARD_LOW_PENALTY * (CBR_EXTREME_LOW - next_cbr)
             
             # 4. Stability reward (small penalty for large parameter changes)
             power_change = abs(next_power - current_state[0])
             mcs_change = abs(next_mcs - current_state[1])
-            stability_penalty = -(power_change + mcs_change) * 0.5  # Small penalty
+            stability_penalty = -(power_change + mcs_change) * REWARD_STABILITY_SCALE
             
             # 5. Efficiency reward (prefer lower power when possible)
             if CBR_RANGE[0] <= next_cbr <= CBR_RANGE[1]:
                 # Only apply efficiency reward when CBR is good
-                efficiency_reward = (30 - next_power) * 0.2  # Slight preference for lower power
+                efficiency_reward = (30 - next_power) * REWARD_EFFICIENCY_SCALE
             else:
                 efficiency_reward = 0
             
             # 6. MCS-SNR compatibility reward/penalty
             mcs_snr_penalty = 0
             if not validate_mcs_for_snr(next_mcs, next_snr):
-                mcs_snr_penalty = -10  # Small penalty for inappropriate MCS for SNR
+                mcs_snr_penalty = -REWARD_MCS_SNR_PENALTY
             
             # Combine all components
             total_reward = (distance_reward + target_zone_reward + 
@@ -505,7 +530,7 @@ class QLearningAgent:
                 total_reward = -50.0
                 
             # Debug logging for critical cases
-            if next_cbr > 0.9 or abs(distance_improvement) > 0.1:
+            if next_cbr > CBR_HIGH_WARNING or abs(distance_improvement) > 0.1:
                 log_message(f"REWARD DEBUG: CBR {current_cbr:.3f}->{next_cbr:.3f}, Distance: {current_distance:.3f}->{next_distance:.3f}, Improvement: {distance_improvement:.3f}, Total Reward: {total_reward:.1f}", LOG_DEBUG_PATH)
             
             return np.clip(total_reward, -500, 500)  # Prevent extreme rewards
@@ -520,7 +545,7 @@ class QLearningAgent:
             # Validate and clean state inputs
             if len(state) < 5:
                 log_message(f"Invalid state length {len(state)}, using defaults", LOG_DEBUG_PATH)
-                state = [15, 4, 0.65, 20, 20]  # default state with target CBR
+                state = [15, 4, CBR_TARGET, 20, 20]  # default state with configured CBR target
             
             # Ensure all state values are valid
             power = np.clip(float(np.real(state[0])), POWER_MIN, POWER_MAX)
@@ -532,7 +557,7 @@ class QLearningAgent:
             # Handle NaN or infinite values
             if not all(np.isfinite([power, mcs, cbr, neighbors, snr])):
                 log_message("Invalid state values detected, using defaults", LOG_DEBUG_PATH)
-                power, mcs, cbr, neighbors, snr = 15, 4, 0.65, 20, 20
+                power, mcs, cbr, neighbors, snr = 15, 4, CBR_TARGET, 20, 20
             
             # Track power usage for analysis
             if self.training_mode and 1 <= int(power) <= 30:
@@ -575,11 +600,11 @@ class QLearningAgent:
                 
                 if random.random() < adaptive_epsilon:
                     # CBR-aware action selection during exploration
-                    if cbr > 0.8:  # CBR too high, bias toward power reduction
+                    if cbr > CBR_HIGH_WARNING:  # CBR too high, bias toward power reduction
                         power_reduction_actions = [3, 4, 5, 9, 10, 11, 13, 15]  # Actions that reduce power
                         action = random.choice(power_reduction_actions)
                         log_message(f"HIGH CBR EXPLORATION: CBR={cbr:.3f}, chose power reduction action {action}", LOG_DEBUG_PATH)
-                    elif cbr < 0.5:  # CBR too low, bias toward power increase
+                    elif cbr < CBR_EXTREME_LOW:  # CBR too low, bias toward power increase
                         power_increase_actions = [0, 1, 2, 6, 7, 8, 12, 14]  # Actions that increase power
                         action = random.choice(power_increase_actions)
                         log_message(f"LOW CBR EXPLORATION: CBR={cbr:.3f}, chose power increase action {action}", LOG_DEBUG_PATH)
@@ -722,13 +747,13 @@ class QLearningAgent:
                     low_power_pct = (low_power_visits / total_power_visits) * 100
                     high_power_pct = (high_power_visits / total_power_visits) * 100
                     
-                    log_message(f"EPISODE {self.episode_count}: Avg CBR={avg_cbr:.3f} (target=0.65), Power exploration - Low(1-15): {low_power_pct:.1f}%, High(16-30): {high_power_pct:.1f}%, Epsilon: {self.epsilon:.3f}", print_stdout=True)
+                    log_message(f"EPISODE {self.episode_count}: Avg CBR={avg_cbr:.3f} (target={CBR_TARGET}), Power exploration - Low(1-15): {low_power_pct:.1f}%, High(16-30): {high_power_pct:.1f}%, Epsilon: {self.epsilon:.3f}", print_stdout=True)
                 
                 # CBR performance trend
                 if len(self.cbr_performance_history) >= 5:
                     recent_trend = np.mean(self.cbr_performance_history[-5:])
                     early_trend = np.mean(self.cbr_performance_history[:5]) if len(self.cbr_performance_history) >= 10 else recent_trend
-                    trend_direction = "IMPROVING" if recent_trend < early_trend and recent_trend < 0.8 else "DEGRADING" if recent_trend > 0.8 else "STABLE"
+                    trend_direction = "IMPROVING" if recent_trend < early_trend and recent_trend < CBR_HIGH_WARNING else "DEGRADING" if recent_trend > CBR_HIGH_WARNING else "STABLE"
                     log_message(f"CBR TREND: {trend_direction} (recent avg: {recent_trend:.3f})", print_stdout=True)
             
             if self.episode_count % MODEL_SAVE_INTERVAL == 0:
@@ -832,8 +857,8 @@ class RLServer:
                         avg_cbr = np.mean(cbr_values)
                         max_cbr = max(cbr_values)
                         min_cbr = min(cbr_values)
-                        if avg_cbr > 0.8 or max_cbr > 0.9:  # Alert for high CBR
-                            log_message(f"  HIGH CBR DETECTED: Avg={avg_cbr:.3f}, Max={max_cbr:.3f}, Min={min_cbr:.3f} (Target=0.65)", print_stdout=True)
+                        if avg_cbr > CBR_HIGH_WARNING or max_cbr > CBR_EXTREME_HIGH:  # Alert for high CBR
+                            log_message(f"⚠️  HIGH CBR DETECTED: Avg={avg_cbr:.3f}, Max={max_cbr:.3f}, Min={min_cbr:.3f} (Target={CBR_TARGET})", print_stdout=True)
                     
                     # Send response
                     response_dict = {"vehicles": responses}
@@ -875,7 +900,7 @@ class RLServer:
             current_mcs = float(veh_info.get("MCS", 4))  # Use existing MCS if available
             current_snr = float(veh_info.get("SINR", veh_info.get("SNR", 20)))
             neighbors = int(veh_info.get("neighbors", 20))
-            cbr = float(veh_info.get("CBR", 0.65))  # CBR is read-only from simulation
+            cbr = float(veh_info.get("CBR", CBR_TARGET))  # CBR is read-only from simulation
             
             # Handle sectoral antenna data if present
             if "front_power" in veh_info and "rear_power" in veh_info:
@@ -892,7 +917,7 @@ class RLServer:
             
             # Handle NaN or infinite values
             if math.isnan(cbr) or not np.isfinite(cbr):
-                cbr = 0.65  # Default to target
+                cbr = CBR_TARGET  # Default to configured target
             if math.isnan(current_snr) or not np.isfinite(current_snr):
                 current_snr = 20.0
             if math.isnan(current_power) or not np.isfinite(current_power):
@@ -945,7 +970,7 @@ class RLServer:
                 response["side_power_static"] = veh_info.get("side_power_static", 10)
             
             # Log interesting cases
-            if cbr > 0.9 or abs(new_power - current_power) > 5:
+            if cbr > CBR_EXTREME_HIGH or abs(new_power - current_power) > 5:
                 log_message(f"Vehicle {veh_id}: Power {current_power:.1f}->{new_power}, MCS {current_mcs:.1f}->{new_mcs}, CBR {cbr:.3f}, Action {action_idx}, Exploration: {is_exploration}", LOG_DEBUG_PATH)
             
             return response
@@ -1013,12 +1038,19 @@ def main():
     print(f" CBR-CENTERED Q-LEARNING VANET SERVER (POWER + MCS)")
     print(f"Host: {HOST}:{PORT}")
     print(f"Mode: {OPERATION_MODE.upper()}")
-    print(f"Target CBR: {CBR_TARGET} (Acceptable range: {CBR_RANGE[0]}-{CBR_RANGE[1]})")
+    print(f" CBR CONFIGURATION:")
+    print(f"   Target CBR: {CBR_TARGET}")
+    print(f"   Acceptable Range: {CBR_RANGE[0]:.3f} - {CBR_RANGE[1]:.3f} (±{CBR_TOLERANCE} tolerance)")
+    print(f"   Wide Range: {CBR_WIDE_RANGE[0]:.3f} - {CBR_WIDE_RANGE[1]:.3f} (±{CBR_WIDE_ACCEPTABLE_TOLERANCE} tolerance)")
+    print(f"   Extreme High Threshold: {CBR_EXTREME_HIGH}")
+    print(f"   High Warning Threshold: {CBR_HIGH_WARNING}")
+    print(f"   Extreme Low Threshold: {CBR_EXTREME_LOW}")
     print(f"Power Range: {POWER_MIN}-{POWER_MAX} dBm (continuous, {POWER_STATES} bins)")
     print(f"MCS Range: {MCS_MIN}-{MCS_MAX} (discrete)")
     print(f"State Dimensions: {STATE_DIM}")
     print(f"Q-table Shape: {q_table.shape}")
     print(f"Action Space Size: {ACTION_DIM}")
+    print(f" Files: Model={MODEL_SAVE_PATH}, Results={PERFORMANCE_LOG_PATH}")
     print("  ADJUSTABLE PARAMETERS:")
     print("  • Power transmission (1-30 dBm)")
     print("  • MCS level (0-9, IEEE 802.11bd)")
@@ -1027,9 +1059,9 @@ def main():
     print("  • Neighbors count")
     print("  • SNR/SINR")
     print("  REWARD FUNCTION FEATURES:")
-    print("  • Massive penalties for extreme CBR (0.9+)")
-    print("  • Rewards for moving closer to 0.65 from ANY direction")  
-    print("  • Target zone bonuses for CBR in 0.6-0.7 range")
+    print("  • Massive penalties for extreme CBR (configurable thresholds)")
+    print(f"  • Rewards for moving closer to {CBR_TARGET} from ANY direction")  
+    print(f"  • Target zone bonuses for CBR in {CBR_RANGE[0]:.2f}-{CBR_RANGE[1]:.2f} range")
     print("  • CBR-aware exploration (more exploration when CBR is bad)")
     print("  • Conservative action space to prevent wild swings")
     print("  • MCS-SNR compatibility checking")
@@ -1039,6 +1071,7 @@ def main():
         print(f"Epsilon Decay: {EPSILON_DECAY}")
         print(f"Min Epsilon: {MIN_EPSILON}")
         print(f"Model will be saved every {MODEL_SAVE_INTERVAL} episodes")
+        print("  USING CONFIGURABLE MODEL NAME!")
     else:
         print(f"Using pre-trained model: {MODEL_SAVE_PATH}")
     print("="*80)
