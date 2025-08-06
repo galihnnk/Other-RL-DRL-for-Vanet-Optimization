@@ -1,6 +1,6 @@
 """
-DUAL-AGENT DEEP Q-NETWORK (DQN) VANET SERVER
-============================================
+DUAL-AGENT DEEP Q-NETWORK (DQN) VANET SERVER (Easy Config)
+==========================================================
 
 Complete DQN implementation with:
 - Neural networks instead of Q-tables
@@ -11,6 +11,7 @@ Complete DQN implementation with:
 - Improved reward functions with quadratic penalties
 - Evidence-based density categorization
 - Sectoral antenna support
+- CENTRALIZED CBR CONFIGURATION for easy tuning
 
 Key improvements over Q-table version:
 - Better generalization across similar states
@@ -40,45 +41,84 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-# ================== CONFIGURATION ==================
-OPERATION_MODE = "TRAINING"        # Options: "TRAINING" or "TESTING"
+# ================== MAIN CONFIGURATION ==================
+OPERATION_MODE = "TESTING"        # Options: "TRAINING" or "TESTING"
 ANTENNA_TYPE = "SECTORAL"          # Options: "SECTORAL" or "OMNIDIRECTIONAL"
 
-# ================== Constants ==================
-CBR_TARGET = 0.4                   # Better latency/PDR performance
-CBR_RANGE = (0.35, 0.45)          # Acceptable CBR range
-SINR_TARGET = 12.0                 # Fixed SINR target
-SINR_GOOD_THRESHOLD = 12.0         # Threshold for diminishing returns
+# ================== CBR CONFIGURATION ==================
+#  MAIN CBR SETTINGS - Change these to adjust CBR behavior
+CBR_TARGET = 0.4                  #  Primary target CBR (0.0 to 1.0) - optimized for latency/PDR
+CBR_TOLERANCE = 0.05              # ±tolerance around target for acceptable range
+CBR_EXTREME_HIGH = 0.8            # CBR above this gets massive penalties
+CBR_HIGH_WARNING = 0.7            # CBR above this gets high penalties  
+CBR_EXTREME_LOW = 0.2             # CBR below this gets penalties
+CBR_WIDE_ACCEPTABLE_TOLERANCE = 0.1  # Wider acceptable range for partial rewards
 
-# DQN Hyperparameters
-LEARNING_RATE = 0.001              # Neural network learning rate
-GAMMA = 0.95                       # Discount factor
-EPSILON = 1.0                      # Initial exploration rate
-EPSILON_DECAY = 0.9995             # Exploration decay
-MIN_EPSILON = 0.1                  # Minimum exploration
-BATCH_SIZE = 64                    # Replay buffer batch size
-REPLAY_BUFFER_SIZE = 100000        # Experience replay buffer size
-TARGET_UPDATE_FREQ = 1000          # Target network update frequency
-MEMORY_MIN_SIZE = 1000             # Minimum experiences before training
+# Automatically calculated CBR ranges (don't change these)
+CBR_RANGE = (CBR_TARGET - CBR_TOLERANCE, CBR_TARGET + CBR_TOLERANCE)
+CBR_WIDE_RANGE = (CBR_TARGET - CBR_WIDE_ACCEPTABLE_TOLERANCE, CBR_TARGET + CBR_WIDE_ACCEPTABLE_TOLERANCE)
 
+# File naming based on CBR target and antenna type (automatically generated)
+CBR_TARGET_STR = f"{CBR_TARGET:.2f}".replace('.', '_')
+MODEL_PREFIX = f"{ANTENNA_TYPE.lower()}_dual_agent_dqn_cbr_{CBR_TARGET_STR}"
+MAC_MODEL_PATH = f'{MODEL_PREFIX}_mac_model.pth'
+PHY_MODEL_PATH = f'{MODEL_PREFIX}_phy_model.pth'
+PERFORMANCE_LOG_PATH = f'{MODEL_PREFIX}_performance.xlsx'
+
+# ================== REWARD FUNCTION CONFIGURATION ==================
+# CBR Reward Parameters
+CBR_REWARD_SCALE = 10.0           # Scale factor for CBR reward
+CBR_TANH_STEEPNESS = 25.0         # Steepness of tanh function for CBR penalty
+
+# MAC Reward Parameters  
+MAC_BEACON_PENALTY_SCALE = 2.0    # Scale factor for beacon deviation penalty
+MAC_MCS_PENALTY_SCALE = 1.5       # Scale factor for MCS deviation penalty
+MAC_SMOOTHNESS_PENALTY = 1.0      # Scale factor for smoothness penalty
+MAC_NEIGHBOR_BEACON_FACTOR = 0.3  # How much neighbors affect optimal beacon rate
+MAC_NEIGHBOR_MCS_FACTOR = 0.4     # How much neighbors affect optimal MCS
+MAC_SECTORAL_BEACON_BOOST = 1.1   # Sectoral antenna beacon multiplier
+MAC_SECTORAL_MCS_BOOST = 1.2      # Sectoral antenna MCS multiplier
+
+# PHY Reward Parameters
+PHY_SINR_REWARD_SCALE = 10.0      # Scale factor for SINR reward below target
+PHY_SINR_DIMINISHING_SCALE = 5.0  # Scale factor for diminishing returns above target
+PHY_POWER_EFFICIENCY_SCALE = 4.0  # Scale factor for power efficiency reward
+PHY_NEIGHBOR_IMPACT_SCALE = 2.0   # Scale factor for neighbor impact penalty
+PHY_SMOOTHNESS_PENALTY = 0.5      # Scale factor for power smoothness penalty
+PHY_SECTORAL_POWER_FACTOR = 0.8   # Sectoral antenna power reduction factor
+
+# ================== SINR CONFIGURATION ==================
+SINR_TARGET = 12.0                # Fixed SINR target
+SINR_GOOD_THRESHOLD = 12.0        # Threshold for diminishing returns
+SINR_MAX_REWARD = 18.0            # Maximum SINR reward
+SINR_EXCESSIVE_THRESHOLD = 20.0   # Threshold for excessive SINR penalty
+
+# ================== DQN HYPERPARAMETERS ==================
+LEARNING_RATE = 0.001             # Neural network learning rate
+GAMMA = 0.95                      # Discount factor
+EPSILON = 1.0                     # Initial exploration rate
+EPSILON_DECAY = 0.9995            # Exploration decay
+MIN_EPSILON = 0.1                 # Minimum exploration
+BATCH_SIZE = 64                   # Replay buffer batch size
+REPLAY_BUFFER_SIZE = 100000       # Experience replay buffer size
+TARGET_UPDATE_FREQ = 1000         # Target network update frequency
+MEMORY_MIN_SIZE = 1000            # Minimum experiences before training
+
+# ================== NETWORK CONSTANTS ==================
 HOST = '127.0.0.1'
 PORT = 5000
 
-# Parameter ranges (same as before)
+# Parameter ranges
 POWER_MIN = 1
 POWER_MAX = 30
 BEACON_MIN = 1
 BEACON_MAX = 20
 
-# File paths
-MODEL_PREFIX = f"{ANTENNA_TYPE.lower()}_dual_agent_dqn"
-MAC_MODEL_PATH = f'{MODEL_PREFIX}_mac_model.pth'
-PHY_MODEL_PATH = f'{MODEL_PREFIX}_phy_model.pth'
-PERFORMANCE_LOG_PATH = f'{MODEL_PREFIX}_performance.xlsx'
+# Intervals
 MODEL_SAVE_INTERVAL = 50
 PERFORMANCE_LOG_INTERVAL = 10
 
-# ================== Action Spaces (Same as before) ==================
+# ================== Action Spaces ==================
 MAC_ACTIONS = [
     (0, 0), (1, 0), (-1, 0), (2, 0), (-2, 0), (3, 0), (-3, 0), (5, 0), (-5, 0),
     (0, 1), (0, -1), (0, 2), (0, -2), (1, 1), (1, -1), (-1, 1), (-1, -1),
@@ -111,6 +151,7 @@ logger = logging.getLogger(__name__)
 
 logger.info("DUAL-AGENT DQN INITIALIZED")
 logger.info(f"CBR Target: {CBR_TARGET}")
+logger.info(f"CBR Range: {CBR_RANGE} (tolerance = ±{CBR_TOLERANCE})")
 logger.info(f"SINR Target: {SINR_TARGET} dB (fixed)")
 logger.info(f"Antenna Type: {ANTENNA_TYPE}")
 logger.info(f"Using PyTorch: {torch.__version__}")
@@ -119,7 +160,7 @@ logger.info(f"Using PyTorch: {torch.__version__}")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger.info(f"Using device: {device}")
 
-# ================== Helper Functions (Keep from previous version) ==================
+# ================== Helper Functions ==================
 def get_neighbor_category(neighbor_count, antenna_type="OMNIDIRECTIONAL"):
     """Evidence-based density categorization"""
     if antenna_type.upper() == "SECTORAL":
@@ -175,22 +216,21 @@ def get_density_multiplier(neighbor_count, antenna_type="OMNIDIRECTIONAL"):
 
 # ================== Improved Reward Functions ==================
 def calculate_sinr_reward(sinr, power_norm, neighbors, antenna_type="OMNIDIRECTIONAL"):
-    """Improved SINR reward with quadratic penalties and logarithmic scaling"""
-    SINR_TARGET = 12.0
+    """Improved SINR reward with configurable parameters"""
     
     # Phase 1: Below target
     if sinr < SINR_TARGET:
-        base_reward = 10.0 * (sinr / SINR_TARGET)
+        base_reward = PHY_SINR_REWARD_SCALE * (sinr / SINR_TARGET)
         # Logarithmic neighbor penalty
-        neighbor_penalty = -2.0 * math.log(1 + neighbors) / math.log(1 + 30)
+        neighbor_penalty = -PHY_NEIGHBOR_IMPACT_SCALE * math.log(1 + neighbors) / math.log(1 + 30)
         sinr_reward = base_reward + neighbor_penalty
     else:
         # Phase 2: Above target - diminishing returns
-        base_reward = 10.0
+        base_reward = PHY_SINR_REWARD_SCALE
         excess_sinr = sinr - SINR_TARGET
-        diminishing_reward = 5.0 * math.sqrt(excess_sinr / 10.0)
+        diminishing_reward = PHY_SINR_DIMINISHING_SCALE * math.sqrt(excess_sinr / 10.0)
         sinr_reward = base_reward + diminishing_reward
-        sinr_reward = min(sinr_reward, 18.0)
+        sinr_reward = min(sinr_reward, SINR_MAX_REWARD)
     
     # Quadratic power penalty when SINR is sufficient
     if sinr >= SINR_TARGET:
@@ -198,12 +238,12 @@ def calculate_sinr_reward(sinr, power_norm, neighbors, antenna_type="OMNIDIRECTI
             power_penalty = -8.0 * ((power_norm - 0.6) ** 2)
             sinr_reward += power_penalty
         elif power_norm <= 0.4:
-            efficiency_bonus = 4.0 * ((0.4 - power_norm) ** 2)
+            efficiency_bonus = PHY_POWER_EFFICIENCY_SCALE * ((0.4 - power_norm) ** 2)
             sinr_reward += efficiency_bonus
     
     # Logarithmic neighbor impact for excessive SINR
-    if sinr > 20.0:
-        neighbor_impact_penalty = -3.0 * math.log(1 + neighbors) / math.log(1 + 50) * (sinr - 20.0) / 10.0
+    if sinr > SINR_EXCESSIVE_THRESHOLD:
+        neighbor_impact_penalty = -3.0 * math.log(1 + neighbors) / math.log(1 + 50) * (sinr - SINR_EXCESSIVE_THRESHOLD) / 10.0
         sinr_reward += neighbor_impact_penalty
     
     return np.clip(sinr_reward, -15, 20)
@@ -418,37 +458,37 @@ class MACDQNAgent(DQNAgent):
         return action_idx
     
     def calculate_reward(self, cbr, sinr, beacon, mcs, neighbors, next_cbr, next_beacon, next_mcs, antenna_type):
-        """MAC reward with improved mathematical formulations"""
+        """MAC reward with configurable mathematical formulations"""
         # Primary CBR optimization
         cbr_error = abs(cbr - CBR_TARGET)
-        cbr_reward = 10.0 * (1 - math.tanh(25 * cbr_error))
+        cbr_reward = CBR_REWARD_SCALE * (1 - math.tanh(CBR_TANH_STEEPNESS * cbr_error))
         
         # Logarithmic beacon optimization
-        optimal_beacon_factor = 1.0 - (0.3 * math.log(1 + neighbors) / math.log(1 + 40))
+        optimal_beacon_factor = 1.0 - (MAC_NEIGHBOR_BEACON_FACTOR * math.log(1 + neighbors) / math.log(1 + 40))
         optimal_beacon = 12.0 * optimal_beacon_factor
         
         if antenna_type.upper() == "SECTORAL":
-            optimal_beacon *= 1.1
+            optimal_beacon *= MAC_SECTORAL_BEACON_BOOST
         
         # Quadratic beacon penalty
         beacon_error = abs(beacon - optimal_beacon)
-        beacon_reward = -2.0 * (beacon_error / 5.0) ** 2
+        beacon_reward = -MAC_BEACON_PENALTY_SCALE * (beacon_error / 5.0) ** 2
         
         # MCS optimization with logarithmic neighbor consideration
-        optimal_mcs_factor = 1.0 - (0.4 * math.log(1 + neighbors) / math.log(1 + 50))
+        optimal_mcs_factor = 1.0 - (MAC_NEIGHBOR_MCS_FACTOR * math.log(1 + neighbors) / math.log(1 + 50))
         optimal_mcs = 8.0 * optimal_mcs_factor
         
         if antenna_type.upper() == "SECTORAL":
-            optimal_mcs *= 1.2
+            optimal_mcs *= MAC_SECTORAL_MCS_BOOST
         
         # Quadratic MCS penalty
         mcs_error = abs(mcs - optimal_mcs)
-        mcs_reward = -1.5 * (mcs_error / 3.0) ** 2
+        mcs_reward = -MAC_MCS_PENALTY_SCALE * (mcs_error / 3.0) ** 2
         
         # Logarithmic smoothness penalty
         beacon_change = abs(next_beacon - beacon)
         mcs_change = abs(next_mcs - mcs)
-        smoothness_penalty = -1.0 * (math.log(1 + beacon_change) + math.log(1 + mcs_change))
+        smoothness_penalty = -MAC_SMOOTHNESS_PENALTY * (math.log(1 + beacon_change) + math.log(1 + mcs_change))
         
         total_reward = cbr_reward + beacon_reward + mcs_reward + smoothness_penalty
         
@@ -494,7 +534,7 @@ class PHYDQNAgent(DQNAgent):
         return action_idx
     
     def calculate_reward(self, cbr, sinr, power, neighbors, next_sinr, next_power, antenna_type):
-        """PHY reward with improved mathematical formulations"""
+        """PHY reward with configurable mathematical formulations"""
         power_norm = (power - POWER_MIN) / (POWER_MAX - POWER_MIN)
         
         # Primary SINR reward
@@ -504,7 +544,7 @@ class PHYDQNAgent(DQNAgent):
         base_power_need = 0.3 + (0.4 * math.log(1 + neighbors) / math.log(1 + 40))
         
         if antenna_type.upper() == "SECTORAL":
-            base_power_need *= 0.8
+            base_power_need *= PHY_SECTORAL_POWER_FACTOR
         
         # Quadratic power efficiency reward/penalty
         power_deviation = power_norm - base_power_need
@@ -512,22 +552,22 @@ class PHYDQNAgent(DQNAgent):
         if abs(power_deviation) <= 0.1:
             power_efficiency_reward = 3.0
         else:
-            power_efficiency_reward = -4.0 * (power_deviation ** 2)
+            power_efficiency_reward = -PHY_POWER_EFFICIENCY_SCALE * (power_deviation ** 2)
         
         # Logarithmic neighbor impact penalty
         if power_norm > 0.7:
-            neighbor_impact_penalty = -2.0 * math.log(1 + neighbors) / math.log(1 + 30) * (power_norm - 0.7) ** 2
+            neighbor_impact_penalty = -PHY_NEIGHBOR_IMPACT_SCALE * math.log(1 + neighbors) / math.log(1 + 30) * (power_norm - 0.7) ** 2
             power_efficiency_reward += neighbor_impact_penalty
         
         # Logarithmic smoothness penalty
         power_change = abs(next_power - power)
-        smoothness_penalty = -0.5 * math.log(1 + power_change)
+        smoothness_penalty = -PHY_SMOOTHNESS_PENALTY * math.log(1 + power_change)
         
         total_reward = sinr_reward + power_efficiency_reward + smoothness_penalty
         
         return np.clip(total_reward, -20, 20)
 
-# ================== Performance Tracking (Updated) ==================
+# ================== Performance Tracking ==================
 class DualAgentDQNPerformanceMetrics:
     def __init__(self):
         self.reset_metrics()
@@ -576,8 +616,9 @@ class DualAgentDQNPerformanceMetrics:
             # Performance metrics
             'avg_cbr': np.mean(self.cbr_values),
             'cbr_in_range_rate': sum(1 for cbr in self.cbr_values if CBR_RANGE[0] <= cbr <= CBR_RANGE[1]) / len(self.cbr_values),
+            'cbr_target_deviation': np.mean([abs(cbr - CBR_TARGET) for cbr in self.cbr_values]),
             'avg_sinr': np.mean(self.sinr_values),
-            'sinr_above_12_rate': sum(1 for sinr in self.sinr_values if sinr >= 12) / len(self.sinr_values),
+            'sinr_above_target_rate': sum(1 for sinr in self.sinr_values if sinr >= SINR_TARGET) / len(self.sinr_values),
             
             # DQN specific metrics
             'avg_mac_loss': np.mean(self.mac_losses) if self.mac_losses else 0,
@@ -616,24 +657,27 @@ class DualAgentDQNPerformanceMetrics:
                     episode_df.to_excel(writer, sheet_name='Episode_Summary', index=False)
                 
                 # DQN analysis
-                analysis_data = {
-                    'Metric': ['MAC Avg Reward', 'PHY Avg Reward', 'Joint Avg Reward',
-                               'CBR Performance', 'SINR Performance', 'MAC Training Loss',
-                               'PHY Training Loss', 'Action Diversity (MAC)', 'Action Diversity (PHY)'],
-                    'Value': [
-                        np.mean([d['avg_mac_reward'] for d in self.episode_data[-10:]]),
-                        np.mean([d['avg_phy_reward'] for d in self.episode_data[-10:]]),
-                        np.mean([d['avg_joint_reward'] for d in self.episode_data[-10:]]),
-                        np.mean([d['cbr_in_range_rate'] for d in self.episode_data[-10:]]),
-                        np.mean([d['sinr_above_12_rate'] for d in self.episode_data[-10:]]),
-                        np.mean([d['avg_mac_loss'] for d in self.episode_data[-10:]]),
-                        np.mean([d['avg_phy_loss'] for d in self.episode_data[-10:]]),
-                        np.mean([d['mac_action_entropy'] for d in self.episode_data[-10:]]),
-                        np.mean([d['phy_action_entropy'] for d in self.episode_data[-10:]])
-                    ]
-                }
-                analysis_df = pd.DataFrame(analysis_data)
-                analysis_df.to_excel(writer, sheet_name='DQN_Analysis', index=False)
+                if len(self.episode_data) >= 10:
+                    analysis_data = {
+                        'Metric': ['MAC Avg Reward', 'PHY Avg Reward', 'Joint Avg Reward',
+                                   'CBR Performance', 'SINR Performance', 'CBR Target Deviation',
+                                   'MAC Training Loss', 'PHY Training Loss', 'Action Diversity (MAC)', 
+                                   'Action Diversity (PHY)'],
+                        'Value': [
+                            np.mean([d['avg_mac_reward'] for d in self.episode_data[-10:]]),
+                            np.mean([d['avg_phy_reward'] for d in self.episode_data[-10:]]),
+                            np.mean([d['avg_joint_reward'] for d in self.episode_data[-10:]]),
+                            np.mean([d['cbr_in_range_rate'] for d in self.episode_data[-10:]]),
+                            np.mean([d['sinr_above_target_rate'] for d in self.episode_data[-10:]]),
+                            np.mean([d['cbr_target_deviation'] for d in self.episode_data[-10:]]),
+                            np.mean([d['avg_mac_loss'] for d in self.episode_data[-10:]]),
+                            np.mean([d['avg_phy_loss'] for d in self.episode_data[-10:]]),
+                            np.mean([d['mac_action_entropy'] for d in self.episode_data[-10:]]),
+                            np.mean([d['phy_action_entropy'] for d in self.episode_data[-10:]])
+                        ]
+                    }
+                    analysis_df = pd.DataFrame(analysis_data)
+                    analysis_df.to_excel(writer, sheet_name='DQN_Analysis', index=False)
                 
             logger.info(f"Performance data saved to {PERFORMANCE_LOG_PATH}")
             
@@ -661,7 +705,7 @@ class DualAgentDQN:
         """Process vehicle with DQN agents"""
         try:
             # Extract current state
-            cbr = float(veh_info.get("CBR", 0.4))
+            cbr = float(veh_info.get("CBR", CBR_TARGET))
             sinr = float(veh_info.get("SINR", veh_info.get("SNR", 20)))
             neighbors = int(veh_info.get("neighbors", 10))
             current_power = float(veh_info.get("transmissionPower", 15))
@@ -680,7 +724,7 @@ class DualAgentDQN:
             
             # Handle NaN values
             if not np.isfinite(cbr):
-                cbr = 0.4
+                cbr = CBR_TARGET
             if not np.isfinite(sinr):
                 sinr = 15.0
             if not np.isfinite(current_power):
@@ -745,7 +789,7 @@ class DualAgentDQN:
                 density_cat = get_neighbor_category(neighbors, antenna_type)
                 expected_sinr = get_expected_sinr_range(neighbors, antenna_type)
                 logger.info(f"Vehicle {veh_id} [{antenna_type}][{density_cat}]: "
-                           f"CBR={cbr:.3f}, SINR={sinr:.1f}dB, Neighbors={neighbors}")
+                           f"CBR={cbr:.3f} (target={CBR_TARGET}), SINR={sinr:.1f}dB, Neighbors={neighbors}")
                 logger.info(f"  Expected SINR: {expected_sinr[0]}-{expected_sinr[1]} dB")
                 logger.info(f"  MAC: Beacon {current_beacon:.0f}->{new_beacon:.0f}Hz, MCS {current_mcs}->{new_mcs}")
                 logger.info(f"  PHY: Power {current_power:.0f}->{new_power:.0f}dBm")
@@ -776,7 +820,7 @@ class DualAgentDQN:
                 logger.info(f"Episode {self.episode_count}: "
                            f"MAC reward={metrics['avg_mac_reward']:.3f}, "
                            f"PHY reward={metrics['avg_phy_reward']:.3f}, "
-                           f"CBR in range={metrics['cbr_in_range_rate']:.2%}, "
+                           f"CBR in range={metrics['cbr_in_range_rate']:.2%} (target={CBR_TARGET}), "
                            f"Losses: MAC={metrics['avg_mac_loss']:.4f}, PHY={metrics['avg_phy_loss']:.4f}")
             
             if self.episode_count % MODEL_SAVE_INTERVAL == 0:
@@ -803,7 +847,7 @@ class DualAgentDQN:
         except Exception as e:
             logger.error(f"Error loading models: {e}")
 
-# ================== Server Implementation (Same structure) ==================
+# ================== Server Implementation ==================
 class DualAgentDQNServer:
     def __init__(self, host, port, training_mode=True):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -869,11 +913,23 @@ class DualAgentDQNServer:
                     logger.info(f"Processing {len(batch_data)} vehicles")
                     
                     responses = {}
+                    cbr_values = []  # Track CBR values for this batch
                     
                     for veh_id, veh_info in batch_data.items():
                         response = self.dual_agent.process_vehicle(veh_id, veh_info)
                         if response:
                             responses[veh_id] = response
+                            # Collect CBR values for monitoring
+                            if "CBR" in veh_info:
+                                cbr_values.append(float(veh_info["CBR"]))
+                    
+                    # Log batch CBR statistics with configurable thresholds
+                    if cbr_values:
+                        avg_cbr = np.mean(cbr_values)
+                        max_cbr = max(cbr_values)
+                        min_cbr = min(cbr_values)
+                        if avg_cbr > CBR_HIGH_WARNING or max_cbr > CBR_EXTREME_HIGH:  # Alert for high CBR
+                            logger.info(f"⚠️  HIGH CBR DETECTED: Avg={avg_cbr:.3f}, Max={max_cbr:.3f}, Min={min_cbr:.3f} (Target={CBR_TARGET})")
                     
                     response_dict = {"vehicles": responses}
                     response_str = json.dumps(response_dict)
@@ -958,6 +1014,14 @@ def main():
     print(f"Antenna Type: {ANTENNA_TYPE.upper()}")
     print(f"Device: {device}")
     print("="*40)
+    print(" CBR CONFIGURATION:")
+    print(f"   Target CBR: {CBR_TARGET}")
+    print(f"   Acceptable Range: {CBR_RANGE[0]:.3f} - {CBR_RANGE[1]:.3f} (±{CBR_TOLERANCE} tolerance)")
+    print(f"   Wide Range: {CBR_WIDE_RANGE[0]:.3f} - {CBR_WIDE_RANGE[1]:.3f} (±{CBR_WIDE_ACCEPTABLE_TOLERANCE} tolerance)")
+    print(f"   Extreme High Threshold: {CBR_EXTREME_HIGH}")
+    print(f"   High Warning Threshold: {CBR_HIGH_WARNING}")
+    print(f"   Extreme Low Threshold: {CBR_EXTREME_LOW}")
+    print("="*40)
     print("DQN ARCHITECTURE:")
     print("  • MAC DQN: [CBR, SINR, beacon, MCS, neighbors] → beacon/MCS actions")
     print("  • PHY DQN: [CBR, SINR, power, neighbors] → power actions")
@@ -972,14 +1036,17 @@ def main():
     print("  ✓ More sample efficient learning")
     print("  ✓ Advanced DQN techniques")
     print("  ✓ GPU acceleration support")
+    print("  ✓ Configurable reward functions")
     print("="*40)
-    print(f"CBR Target: {CBR_TARGET} (optimized for latency/PDR)")
+    print(f" Files: MAC={MAC_MODEL_PATH}, PHY={PHY_MODEL_PATH}")
+    print(f"         Results={PERFORMANCE_LOG_PATH}")
     print(f"SINR Target: {SINR_TARGET} dB (fixed)")
-    print("Reward Functions: Quadratic penalties + logarithmic scaling")
+    print("Reward Functions: Configurable quadratic penalties + logarithmic scaling")
     if training_mode:
         print(f"Learning Rate: {LEARNING_RATE}")
         print(f"Initial Epsilon: {EPSILON}")
         print(f"Models will be saved every {MODEL_SAVE_INTERVAL} episodes")
+        print("  USING CONFIGURABLE MODEL NAMES!")
     else:
         print("Using pre-trained DQN models")
     print("="*80)
@@ -995,5 +1062,4 @@ def main():
         dqn_server.stop()
 
 if __name__ == "__main__":
-
     main()
