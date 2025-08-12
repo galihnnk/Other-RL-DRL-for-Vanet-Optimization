@@ -49,21 +49,23 @@ CBR_RANGE = (0.35, 0.45)          # Acceptable CBR range
 SINR_TARGET = 12.0                 # Target SINR
 SINR_GOOD_THRESHOLD = 12.0         # Threshold for diminishing returns
 
-# ================== DENSITY-ADAPTIVE POWER RANGES ==================
-# Power exploration ranges based on network density
+# ================== DENSITY-ADAPTIVE POWER RANGES (UPDATED) ==================
+# Power exploration ranges based on realistic VANET density scenarios
 POWER_RANGES = {
-    "LOW": (10, 30),        # Low density: can use higher power
-    "MEDIUM": (5, 20),      # Medium density: moderate power
-    "HIGH": (3, 15),        # High density: reduced power
-    "VERY_HIGH": (1, 12)    # Very high density: minimal power
+    "VERY_LOW": (15, 30),       # Rural/Highway: can use higher power for range
+    "LOW": (12, 25),            # Sparse Urban: good power range
+    "MEDIUM": (8, 18),          # Normal Urban: moderate power
+    "HIGH": (5, 12),            # Dense Urban: reduced power
+    "VERY_HIGH": (3, 8),        # Traffic Jam: low power to reduce interference
+    "EXTREME": (1, 5)           # Extreme Congestion: minimal power only
 }
 
 # System parameters
 BUFFER_SIZE = 100000
-LEARNING_RATE = 0.25
+LEARNING_RATE = 0.15
 DISCOUNT_FACTOR = 0.95
 EPSILON = 1.0
-EPSILON_DECAY = 0.999
+EPSILON_DECAY = 0.9995
 MIN_EPSILON = 0.1
 HOST = '127.0.0.1'
 PORT = 5000
@@ -85,82 +87,101 @@ PERFORMANCE_LOG_PATH = f'{MODEL_PREFIX}_performance.xlsx'
 MODEL_SAVE_INTERVAL = 50
 PERFORMANCE_LOG_INTERVAL = 10
 
-# ================== DENSITY CATEGORIZATION (KEPT FROM ORIGINAL) ==================
+# ================== UPDATED DENSITY CATEGORIZATION (6-LEVEL REALISTIC) ==================
 def get_neighbor_category(neighbor_count, antenna_type="OMNIDIRECTIONAL"):
-    """Evidence-based density categorization with antenna awareness"""
+    """REALISTIC: VANET density categorization with 6 levels for better precision"""
+    
     if antenna_type.upper() == "SECTORAL":
-        if neighbor_count <= 13:      
+        # Sectoral antenna: reduce effective neighbors by 30% (0.7 factor)
+        effective_neighbors = neighbor_count * 0.7
+        
+        if effective_neighbors <= 2:        # ≤3 total - Rural/Highway
+            return "VERY_LOW"
+        elif effective_neighbors <= 4:      # ≤6 total - Sparse Urban  
             return "LOW"
-        elif neighbor_count <= 26:    
+        elif effective_neighbors <= 8:      # ≤12 total - Normal Urban
             return "MEDIUM"
-        elif neighbor_count <= 40:    
+        elif effective_neighbors <= 12:     # ≤18 total - Dense Urban
             return "HIGH"
-        else:
+        elif effective_neighbors <= 18:     # ≤25 total - Traffic Jam
             return "VERY_HIGH"
+        else:                                # >25 total - Extreme Congestion
+            return "EXTREME"
     else:
-        if neighbor_count <= 10:
+        # Omnidirectional antenna
+        if neighbor_count <= 2:             # Rural/Highway
+            return "VERY_LOW"
+        elif neighbor_count <= 5:           # Sparse Urban
             return "LOW"
-        elif neighbor_count <= 20:
+        elif neighbor_count <= 10:          # Normal Urban
             return "MEDIUM"
-        elif neighbor_count <= 30:
+        elif neighbor_count <= 15:          # Dense Urban
             return "HIGH"
-        else:
+        elif neighbor_count <= 22:          # Traffic Jam
             return "VERY_HIGH"
+        else:                                # >22 - Extreme Congestion
+            return "EXTREME"
 
 def get_expected_sinr_range(neighbor_count, antenna_type="OMNIDIRECTIONAL"):
-    """Get expected SINR range based on density and antenna type"""
+    """Updated SINR ranges for new 6-level density system"""
     category = get_neighbor_category(neighbor_count, antenna_type)
     
     if antenna_type.upper() == "SECTORAL":
         ranges = {
-            "LOW": (18, 35),        
-            "MEDIUM": (11, 25),     
-            "HIGH": (5, 17),        
-            "VERY_HIGH": (-2, 13)   
+            "VERY_LOW": (25, 40),       # Rural/Highway - excellent SINR
+            "LOW": (18, 35),            # Sparse Urban - very good SINR
+            "MEDIUM": (11, 25),         # Normal Urban - good SINR
+            "HIGH": (5, 17),            # Dense Urban - moderate SINR
+            "VERY_HIGH": (-2, 13),      # Traffic Jam - poor SINR
+            "EXTREME": (-8, 8)          # Extreme Congestion - very poor SINR
         }
     else:
         ranges = {
-            "LOW": (15, 30),
-            "MEDIUM": (8, 20),
-            "HIGH": (2, 12),
-            "VERY_HIGH": (-5, 8)
+            "VERY_LOW": (20, 35),       # Rural/Highway
+            "LOW": (15, 30),            # Sparse Urban
+            "MEDIUM": (8, 20),          # Normal Urban
+            "HIGH": (2, 12),            # Dense Urban
+            "VERY_HIGH": (-5, 8),       # Traffic Jam
+            "EXTREME": (-10, 5)         # Extreme Congestion
         }
     
     return ranges.get(category, (8, 20))
 
 def get_density_multiplier(neighbor_count, antenna_type="OMNIDIRECTIONAL"):
-    """Density-based reward multiplier"""
+    """Updated density-based reward multiplier for 6 levels"""
     category = get_neighbor_category(neighbor_count, antenna_type)
     multipliers = {
-        "LOW": 0.8,
-        "MEDIUM": 1.0,        
-        "HIGH": 1.4,
-        "VERY_HIGH": 1.8
+        "VERY_LOW": 0.6,            # Low challenge
+        "LOW": 0.8,                 # Moderate challenge
+        "MEDIUM": 1.0,              # Baseline challenge
+        "HIGH": 1.4,                # High challenge
+        "VERY_HIGH": 1.8,           # Very high challenge
+        "EXTREME": 2.2              # Extreme challenge
     }
     return multipliers.get(category, 1.0)
 
 # ================== UNIFIED STATE DISCRETIZATION ==================
 CBR_BINS = np.linspace(0.0, 1.0, 21)           # 20 states
 SINR_BINS = np.linspace(0, 50, 11)             # 10 states  
-NEIGHBORS_BINS = np.linspace(0, 50, 11)        # 10 states
+NEIGHBORS_BINS = np.linspace(0, 30, 9)         # 8 states to handle up to EXTREME density
 POWER_BINS = np.arange(1, 31)                  # 30 states
 BEACON_BINS = np.arange(1, 21)                 # 20 states
 MCS_BINS = np.arange(0, 10)                    # 10 states
 STRATEGY_BINS = np.arange(0, 3)                # 3 strategies
 
-# ================== POWER-CENTRIC STATE DIMENSIONS (REDUCED) ==================
-# Reduced dimensions to prevent memory issues
-CBR_STATES = 10          # Reduced from 20
-SINR_STATES = 8          # Reduced from 10  
-NEIGHBORS_STATES = 6     # Reduced from 10
-POWER_STATES = 15        # Reduced from 30
-BEACON_STATES = 10       # Reduced from 20
-MCS_STATES = 8           # Reduced from 10
+# ================== POWER-CENTRIC STATE DIMENSIONS (UPDATED) ==================
+# Updated dimensions to handle 6-level density system
+CBR_STATES = 10          # CBR discretization
+SINR_STATES = 8          # SINR discretization  
+NEIGHBORS_STATES = 8     # Updated from 6 to better handle EXTREME category
+POWER_STATES = 15        # Power discretization
+BEACON_STATES = 10       # Beacon discretization
+MCS_STATES = 8           # MCS discretization
 
-UNIFIED_STATE_DIM = (10, 8, 6)                 # (CBR, SINR, Neighbors) - simplified core state
-META_STATE_DIM = (10, 8, 6)                    # Same as unified for meta decisions
+UNIFIED_STATE_DIM = (10, 8, 8)                 # (CBR, SINR, Neighbors) - updated neighbors
+META_STATE_DIM = (10, 8, 8)                    # Same as unified for meta decisions
 POWER_STATE_DIM = UNIFIED_STATE_DIM + (3,)     # + Strategy (PRIMARY)
-MAC_STATE_DIM = (10, 8, 6, 3, 5)              # CBR, SINR, Neighbors, Strategy, Power_Change_Category (SECONDARY)
+MAC_STATE_DIM = (10, 8, 8, 3, 5)              # CBR, SINR, Neighbors, Strategy, Power_Change_Category
 
 # ================== POWER-CENTRIC ACTION SPACES ==================
 # Meta-Controller actions (strategy selection)
@@ -240,15 +261,15 @@ def discretize(value, bins):
             return max(0, min(len(bins) - 2, bin_idx))
 
 def get_unified_state_indices(cbr, sinr, neighbors):
-    """SIMPLIFIED unified state representation for reduced dimensions"""
+    """UPDATED unified state representation for 6-level density system"""
     cbr_idx = discretize(cbr, CBR_BINS)
     sinr_idx = discretize(sinr, SINR_BINS)  
     neighbors_idx = discretize(neighbors, NEIGHBORS_BINS)
     
-    # Ensure indices are within bounds
+    # Ensure indices are within bounds for updated dimensions
     cbr_idx = min(cbr_idx, CBR_STATES - 1)
     sinr_idx = min(sinr_idx, SINR_STATES - 1)
-    neighbors_idx = min(neighbors_idx, NEIGHBORS_STATES - 1)
+    neighbors_idx = min(neighbors_idx, NEIGHBORS_STATES - 1)  # Now supports up to 7 (0-7 for 8 states)
     
     return (cbr_idx, sinr_idx, neighbors_idx)
 
@@ -267,39 +288,40 @@ def categorize_power_change(power_change):
 
 def get_density_adaptive_power_range(neighbor_count, antenna_type="OMNIDIRECTIONAL"):
     """
-    FIXED: More aggressive power ranges for better efficiency
-    
-    Addresses high power usage in low density scenarios.
+    REALISTIC: More appropriate power ranges for actual VANET scenarios
+    Much lower ranges to encourage efficiency learning
     """
     
-    # SECTORAL ANTENNA OPTIMIZATION: More conservative effective neighbor calculation
     if antenna_type.upper() == "SECTORAL":
-        # Use 0.6 factor instead of 0.5 to account for some directional overlap
-        effective_neighbors = neighbor_count * 0.6
-        logger.debug(f"Sectoral antenna: Total neighbors={neighbor_count}, Effective={effective_neighbors:.1f}")
+        # Use 0.7 factor for sectoral antenna directional focus
+        effective_neighbors = neighbor_count * 0.7
+        
+        if effective_neighbors <= 2:        # VERY_LOW density (Rural/Highway)
+            return (15, 30)                  # Can use higher power for range
+        elif effective_neighbors <= 4:      # LOW density (Sparse Urban)
+            return (12, 25)                  # Good power range
+        elif effective_neighbors <= 8:      # MEDIUM density (Normal Urban)
+            return (8, 18)                   # Moderate power range
+        elif effective_neighbors <= 12:     # HIGH density (Dense Urban)
+            return (5, 12)                   # Reduced power range
+        elif effective_neighbors <= 18:     # VERY_HIGH density (Traffic Jam)
+            return (3, 8)                    # Low power range
+        else:                                # EXTREME density (Extreme Congestion)
+            return (1, 5)                    # Minimal power range
     else:
-        effective_neighbors = neighbor_count
-    
-    # FIXED: More aggressive power ranges to force efficiency learning
-    if antenna_type.upper() == "SECTORAL":
-        if effective_neighbors <= 5:        # LOW density per direction
-            return (8, 18)                   # Reduced from (10, 30)
-        elif effective_neighbors <= 10:     # MEDIUM density per direction  
-            return (6, 15)                   # Reduced from (8, 25)
-        elif effective_neighbors <= 16:     # HIGH density per direction
-            return (4, 12)                   # Reduced from (5, 18)
-        else:                                # VERY_HIGH density per direction
-            return (3, 10)                   # Reduced from (3, 15)
-    else:
-        # Omnidirectional - also more aggressive
-        if neighbor_count <= 8:
-            return (8, 20)                   # Reduced ranges
-        elif neighbor_count <= 16:
-            return (5, 15)
-        elif neighbor_count <= 25:
-            return (3, 12)
-        else:
-            return (1, 10)
+        # Omnidirectional antenna - more conservative ranges
+        if neighbor_count <= 2:             # VERY_LOW (Rural/Highway)
+            return (15, 30)
+        elif neighbor_count <= 5:           # LOW (Sparse Urban)
+            return (12, 25)
+        elif neighbor_count <= 10:          # MEDIUM (Normal Urban)
+            return (8, 18)
+        elif neighbor_count <= 15:          # HIGH (Dense Urban)
+            return (5, 12)
+        elif neighbor_count <= 22:          # VERY_HIGH (Traffic Jam)
+            return (3, 8)
+        else:                                # EXTREME (Extreme Congestion)
+            return (1, 5)
 
 def get_strategy_parameters(strategy_idx):
     """Get strategy-specific parameters for power-centric system"""
@@ -480,7 +502,7 @@ class MetaController:
         density_category = get_neighbor_category(neighbors, antenna_type)
         
         if strategy_idx == 0:  # CONSERVATIVE
-            if cbr > 0.5 or density_category in ["HIGH", "VERY_HIGH"]:
+            if cbr > 0.5 or density_category in ["HIGH", "VERY_HIGH", "EXTREME"]:
                 strategy_bonus = 5.0  # Good choice in crowded conditions
             elif cbr < 0.3:
                 strategy_bonus = -3.0  # Poor choice when network underutilized
@@ -550,7 +572,7 @@ class PrimaryPowerAgent:
     
     def select_action(self, state_indices, strategy_idx, current_power, current_cbr, current_sinr,
                      neighbors, antenna_type="OMNIDIRECTIONAL"):
-        """PRIMARY power action selection with density-adaptive exploration"""
+        """PRIMARY power action selection with 6-level density-adaptive exploration"""
         self.state_visit_counts[state_indices] += 1
         self.last_strategy = strategy_idx
         
@@ -559,40 +581,37 @@ class PrimaryPowerAgent:
         power_min, power_max = get_density_adaptive_power_range(neighbors, antenna_type)
         density_category = get_neighbor_category(neighbors, antenna_type)
         
-        # Calculate adaptive epsilon with AGGRESSIVE efficiency bias
+        # Calculate adaptive epsilon with efficiency bias
         adaptive_epsilon = self.epsilon * strategy_params['exploration_multiplier']
         
-        # FIXED: Much more aggressive epsilon reduction for efficiency learning
+        # Much more aggressive epsilon reduction for efficiency learning
         if current_cbr > 0.6:  # High CBR - need aggressive power reduction
             adaptive_epsilon = min(1.0, adaptive_epsilon * 1.5)
         elif current_sinr < 8:  # Poor SINR - need careful power adjustment
             adaptive_epsilon = min(1.0, adaptive_epsilon * 1.3)
         elif power_min <= current_power <= (power_min + power_max) / 2 and CBR_RANGE[0] <= current_cbr <= CBR_RANGE[1]:
             # Good performance with reasonable power - much less exploration
-            adaptive_epsilon = max(0.01, adaptive_epsilon * 0.3)  # Very low exploration
+            adaptive_epsilon = max(0.01, adaptive_epsilon * 0.2)  # Very low exploration
         elif current_power > (power_min + power_max) * 0.8:  # High power usage
             # Force learning of lower power - bias toward power reduction
-            adaptive_epsilon = max(0.05, adaptive_epsilon * 0.5)
+            adaptive_epsilon = max(0.05, adaptive_epsilon * 0.4)
         
         if random.random() < adaptive_epsilon:
-            # INTELLIGENT DENSITY AND STRATEGY-AWARE EXPLORATION
+            # INTELLIGENT 6-LEVEL DENSITY-AWARE EXPLORATION
             
-            # 1. Density-aware power targeting with SECTORAL ANTENNA OPTIMIZATION
-            effective_neighbors = neighbors / 2 if antenna_type.upper() == "SECTORAL" else neighbors
-            density_category = get_neighbor_category(neighbors, antenna_type)
-            
-            if density_category == "VERY_HIGH":  # High effective density
+            if density_category == "EXTREME":  # >25 vehicles (OMNIDIRECTIONAL) / >25 total (SECTORAL)
+                # Critical congestion - emergency power reduction only
+                preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if p <= -5]
+                
+            elif density_category == "VERY_HIGH":  # Traffic jam scenario (15-22 OMNIDIRECTIONAL / 18-25 SECTORAL)
                 if current_cbr > 0.5:
-                    # Critical congestion - immediate power reduction
                     preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if p <= -3]
                 elif current_power > power_max:
-                    # Above density-appropriate range
-                    preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if p <= -1]
+                    preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if p <= -2]
                 else:
-                    # Minimal power adjustments
                     preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if abs(p) <= 2]
                     
-            elif density_category == "HIGH":  # Moderate effective density
+            elif density_category == "HIGH":  # Dense urban (10-15 OMNIDIRECTIONAL / 12-18 SECTORAL)
                 if current_cbr > 0.55:
                     preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if p <= -2]
                 elif current_sinr < SINR_TARGET and current_power < power_max:
@@ -600,7 +619,7 @@ class PrimaryPowerAgent:
                 else:
                     preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if abs(p) <= 3]
                     
-            elif density_category == "MEDIUM":  # Balanced effective density
+            elif density_category == "MEDIUM":  # Normal urban (5-10 OMNIDIRECTIONAL / 8-12 SECTORAL)
                 if current_cbr > 0.5:
                     preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if p <= 0]
                 elif current_sinr < SINR_TARGET:
@@ -608,47 +627,51 @@ class PrimaryPowerAgent:
                 else:
                     preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if abs(p) <= 5]
                     
-            else:  # LOW effective density - more freedom
-                if current_sinr < SINR_TARGET - 3:
-                    preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if p >= 3]
+            elif density_category == "LOW":  # Sparse urban (3-5 OMNIDIRECTIONAL / 4-8 SECTORAL)
+                if current_sinr < SINR_TARGET - 2:
+                    preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if p >= 2]
                 elif current_cbr > 0.6:  # Unusual in low density
-                    preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if p <= -2]
+                    preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if p <= -1]
+                else:
+                    preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if abs(p) <= 7]
+                    
+            else:  # VERY_LOW - Rural/Highway (≤2 OMNIDIRECTIONAL / ≤3 SECTORAL)
+                if current_sinr < SINR_TARGET - 5:
+                    preferred_actions = [i for i, p in enumerate(POWER_ACTIONS) if p >= 5]
                 else:
                     preferred_actions = list(range(POWER_ACTION_DIM))  # Any action
             
-            # Log sectoral antenna optimization
+            # Log realistic density scenario
             if antenna_type.upper() == "SECTORAL" and random.random() < 0.05:  # 5% logging
-                logger.debug(f"SECTORAL OPTIMIZATION: Total neighbors={neighbors}, "
-                           f"Effective per direction={effective_neighbors:.1f}, "
-                           f"Density category={density_category}, Power range={power_min}-{power_max}dBm")
+                scenario_map = {
+                    "VERY_LOW": "Rural/Highway", "LOW": "Sparse Urban", "MEDIUM": "Normal Urban",
+                    "HIGH": "Dense Urban", "VERY_HIGH": "Traffic Jam", "EXTREME": "Extreme Congestion"
+                }
+                logger.debug(f"REALISTIC VANET: {neighbors} neighbors → {density_category} ({scenario_map[density_category]}), "
+                           f"Power range={power_min}-{power_max}dBm")
             
-            # 2. ENHANCED Strategy-specific bias with efficiency focus
+            # Strategy-specific bias with efficiency focus
             if strategy_idx == 0:  # CONSERVATIVE
-                # Prefer smaller power changes and lower absolute power
                 conservative_actions = [i for i, p in enumerate(POWER_ACTIONS) if abs(p) <= strategy_params['power_change_limit']]
-                if current_power > (power_min + power_max) / 2:  # Above mid-range
-                    # STRONG bias toward power reduction
+                if current_power > (power_min + power_max) / 2:
                     conservative_actions = [i for i, p in enumerate(conservative_actions) if POWER_ACTIONS[i] <= -1]
                 preferred_actions = list(set(preferred_actions) & set(conservative_actions)) if preferred_actions else conservative_actions
                 
             elif strategy_idx == 2:  # AGGRESSIVE
-                # Allow larger changes when performance is poor, but still consider efficiency
                 if current_cbr > 0.6 or current_sinr < 8:
                     aggressive_actions = [i for i, p in enumerate(POWER_ACTIONS) if abs(p) >= 3]
                 elif current_sinr >= SINR_TARGET and current_power > power_min + 5:
-                    # Good SINR but high power - bias toward reduction
                     aggressive_actions = [i for i, p in enumerate(POWER_ACTIONS) if p <= -2]
                 else:
                     aggressive_actions = [i for i, p in enumerate(POWER_ACTIONS) if abs(p) >= 2]
                 preferred_actions = aggressive_actions if aggressive_actions else preferred_actions
                 
             else:  # BALANCED - add efficiency bias
-                # Strong bias toward power efficiency when performance is acceptable
                 if current_sinr >= SINR_TARGET - 2 and current_cbr <= 0.5:
-                    efficiency_actions = [i for i, p in enumerate(POWER_ACTIONS) if p <= 1]  # Prefer lower/stable power
+                    efficiency_actions = [i for i, p in enumerate(POWER_ACTIONS) if p <= 1]
                     preferred_actions = efficiency_actions if efficiency_actions else preferred_actions
             
-            # 3. Bounds checking for density-adaptive ranges
+            # Bounds checking for density-adaptive ranges
             valid_actions = []
             for i in (preferred_actions if preferred_actions else list(range(POWER_ACTION_DIM))):
                 new_power = current_power + POWER_ACTIONS[i]
@@ -658,8 +681,7 @@ class PrimaryPowerAgent:
             if valid_actions:
                 action = random.choice(valid_actions)
             else:
-                # Fallback to minimal change
-                action = 0  # No change
+                action = 0  # No change fallback
                 
             self.power_history.append(('exploration', current_power, POWER_ACTIONS[action], density_category))
             return action
@@ -794,6 +816,7 @@ class PrimaryPowerAgent:
         self.q_table[state_indices][action] = new_q
         
         return new_q - current_q
+
 # ================== SECONDARY MAC AGENT ==================
 class SecondaryMACAgent:
     """SECONDARY MAC Agent - Fine-tunes beacon/MCS under power guidance"""
@@ -876,7 +899,7 @@ class SecondaryMACAgent:
             
             # 3. Density-aware bounds
             density_category = get_neighbor_category(neighbors, antenna_type)
-            if density_category in ["HIGH", "VERY_HIGH"]:
+            if density_category in ["HIGH", "VERY_HIGH", "EXTREME"]:
                 # Limit beacon increases in high density
                 safe_actions = [i for i in (preferred_actions if preferred_actions else list(range(MAC_ACTION_DIM))) 
                               if MAC_ACTIONS[i][0] <= 1]  # Beacon change ≤ 1
@@ -1571,7 +1594,7 @@ class PowerCentricHierarchicalSystem:
             
             if self.episode_count % MODEL_SAVE_INTERVAL == 0:
                 self.save_models()
-                logger.info(f"📾 PERIODIC MODEL SAVE: Episode {self.episode_count}")
+                logger.info(f"PERIODIC MODEL SAVE: Episode {self.episode_count}")
             
             self.performance.reset_metrics()
             return metrics
@@ -1583,10 +1606,10 @@ class PowerCentricHierarchicalSystem:
             np.save(META_MODEL_PATH, self.meta_controller.q_table)
             np.save(POWER_MODEL_PATH, self.power_agent.q_table)
             np.save(MAC_MODEL_PATH, self.mac_agent.q_table)
-            logger.info(f"💾 MODELS SAVED: {META_MODEL_PATH}, {POWER_MODEL_PATH}, {MAC_MODEL_PATH}")
+            logger.info(f"MODELS SAVED: {META_MODEL_PATH}, {POWER_MODEL_PATH}, {MAC_MODEL_PATH}")
             self.last_save_time = time.time()
         except Exception as e:
-            logger.error(f"❌ Error saving models: {e}")
+            logger.error(f"Error saving models: {e}")
     
     def check_and_save_periodically(self):
         """Check if it's time to save models (every 5 minutes during training)"""
@@ -1594,7 +1617,7 @@ class PowerCentricHierarchicalSystem:
             current_time = time.time()
             if current_time - self.last_save_time > 300:  # 5 minutes
                 self.save_models()
-                logger.info(f"⏰ TIME-BASED MODEL SAVE: {datetime.now().strftime('%H:%M:%S')}")
+                logger.info(f"TIME-BASED MODEL SAVE: {datetime.now().strftime('%H:%M:%S')}")
     
     def load_models(self):
         """Load pre-trained Q-tables for power-centric system"""
@@ -1731,29 +1754,29 @@ class PowerCentricHierarchicalServer:
                         
                         # Density distribution
                         density_counts = {}
-                        for density in ["LOW", "MEDIUM", "HIGH", "VERY_HIGH"]:
+                        for density in ["VERY_LOW", "LOW", "MEDIUM", "HIGH", "VERY_HIGH", "EXTREME"]:
                             density_counts[density] = batch_density_categories.count(density)
                         dominant_density = max(density_counts, key=density_counts.get) if density_counts else "UNKNOWN"
                         
-                        logger.info(f"🔋 POWER-CENTRIC BATCH ANALYSIS:")
+                        logger.info(f"POWER-CENTRIC BATCH ANALYSIS:")
                         logger.info(f"   CBR: Avg={avg_cbr:.3f}, Max={max_cbr:.3f} | Power: Avg={avg_power:.1f}dBm, Range=[{min_power}, {max_power}]")
                         logger.info(f"   Power Efficiency: {avg_power_efficiency:.2%} | Dominant Strategy: {dominant_strategy} | Dominant Density: {dominant_density}")
                         
                         # Critical alerts for power-centric system
                         if avg_cbr > 0.6:
                             high_cbr_vehicles = sum(1 for cbr in batch_cbr_values if cbr > 0.6)
-                            logger.warning(f"⚠️  HIGH CBR CRISIS: {high_cbr_vehicles}/{len(batch_cbr_values)} vehicles above 0.6 CBR")
+                            logger.warning(f"HIGH CBR CRISIS: {high_cbr_vehicles}/{len(batch_cbr_values)} vehicles above 0.6 CBR")
                             logger.warning(f"   Recommended: Increase CONSERVATIVE strategy usage, reduce power globally")
                         
-                        if avg_power > 20 and dominant_density in ["HIGH", "VERY_HIGH"]:
-                            logger.warning(f"⚠️  POWER TOO HIGH for {dominant_density} density: Avg={avg_power:.1f}dBm")
+                        if avg_power > 20 and dominant_density in ["HIGH", "VERY_HIGH", "EXTREME"]:
+                            logger.warning(f"POWER TOO HIGH for {dominant_density} density: Avg={avg_power:.1f}dBm")
                         
                         if avg_power_efficiency < 0.3:
-                            logger.warning(f"⚠️  LOW POWER EFFICIENCY: {avg_power_efficiency:.2%} - Power usage not optimal for density")
+                            logger.warning(f"LOW POWER EFFICIENCY: {avg_power_efficiency:.2%} - Power usage not optimal for density")
                         
                         # Positive feedback
                         if avg_cbr <= CBR_RANGE[1] and avg_power_efficiency > 0.6:
-                            logger.info(f"✅ EXCELLENT POWER-CENTRIC PERFORMANCE: CBR in range + high efficiency")
+                            logger.info(f"EXCELLENT POWER-CENTRIC PERFORMANCE: CBR in range + high efficiency")
                     
                     # Send response
                     response_dict = {"vehicles": responses}
@@ -1768,7 +1791,7 @@ class PowerCentricHierarchicalServer:
                     if self.training_mode and len(self.power_centric_system.performance.power_rewards) >= 100:
                         metrics = self.power_centric_system.end_episode()
                         if metrics:
-                            logger.info(f"🔋 POWER-CENTRIC Training Episode {self.power_centric_system.episode_count} completed")
+                            logger.info(f"POWER-CENTRIC Training Episode {self.power_centric_system.episode_count} completed")
                             logger.info(f"   Power Dominance: {metrics.get('power_reward_dominance', 0):.2%} | "
                                        f"Power Efficiency: {metrics.get('power_efficiency_score', 0):.2%}")
                 
@@ -1791,7 +1814,7 @@ class PowerCentricHierarchicalServer:
     def start(self):
         """Start power-centric hierarchical server with proper signal handling"""
         try:
-            logger.info("🔋 Power-Centric Hierarchical Multi-Agent RL Server listening for connections...")
+            logger.info("Power-Centric Hierarchical Multi-Agent RL Server listening for connections...")
             # Set socket timeout to make it responsive to interrupts
             self.server.settimeout(1.0)
             
@@ -1834,18 +1857,17 @@ class PowerCentricHierarchicalServer:
             # Final power-centric analysis
             final_metrics = self.power_centric_system.coordination_manager.get_coordination_metrics()
             if final_metrics:
-                logger.info(f"🔋 FINAL POWER-CENTRIC ANALYSIS:")
+                logger.info(f"FINAL POWER-CENTRIC ANALYSIS:")
                 logger.info(f"   Power Dominance Ratio: {final_metrics.get('power_dominance_ratio', 0):.2%}")
                 logger.info(f"   Power-Centric Coordination: {final_metrics.get('power_centric_coordination', 0):.3f}")
                 logger.info(f"   Meta Stability: {final_metrics.get('meta_stability', 0):.3f}")
         
         logger.info("Power-Centric Hierarchical Multi-Agent RL server stopped")
 
-# ================== MAIN EXECUTION ==================
 # ================== SIGNAL HANDLERS FOR GRACEFUL SHUTDOWN ==================
 def signal_handler(signum, frame, rl_server=None):
     """Handle interrupt signals gracefully"""
-    logger.info(f"\n🛑 Received signal {signum}. Gracefully shutting down...")
+    logger.info(f"\nReceived signal {signum}. Gracefully shutting down...")
     if rl_server:
         rl_server.stop()
     else:
@@ -1865,79 +1887,105 @@ def main():
     training_mode = (OPERATION_MODE.upper() == "TRAINING")
     
     print("="*120)
-    print(" 🔋 POWER-CENTRIC HIERARCHICAL MULTI-AGENT Q-LEARNING VANET OPTIMIZATION SYSTEM")
+    print(" POWER-CENTRIC HIERARCHICAL MULTI-AGENT Q-LEARNING VANET OPTIMIZATION SYSTEM")
     print("="*120)
     print(f"Host: {HOST}:{PORT}")
     print(f"Mode: {OPERATION_MODE.upper()}")
     print(f"Antenna Type: {ANTENNA_TYPE.upper()}")
     print("="*60)
-    print("🔋 POWER-FIRST HIERARCHICAL ARCHITECTURE:")
-    print("  🧠 Meta-Controller: High-level strategy decisions")
-    print("     ├── CONSERVATIVE: Minimal power, small changes, CBR-focused")
-    print("     ├── BALANCED: Adaptive power, moderate changes, balanced objectives")
-    print("     └── AGGRESSIVE: Performance-first power, large changes, SINR-focused")
-    print("  ⚡ PRIMARY Power Agent: Main power transmission control (PRIORITY #1)")
-    print("     ├── Density-adaptive power ranges (1-12 dBm in very high density)")
-    print("     ├── Strategy-guided power exploration")
-    print("     └── CBR-first optimization with SINR balance")
-    print("  📡 SECONDARY MAC Agent: Beacon/MCS fine-tuning under power guidance")
-    print("     ├── Power-coordinated MAC adjustments")
-    print("     ├── Strategy and power-action aware decisions")
-    print("     └── Secondary optimization layer")
+    print("POWER-FIRST HIERARCHICAL ARCHITECTURE:")
+    print("  Meta-Controller: High-level strategy decisions")
+    print("     Conservative: Minimal power, small changes, CBR-focused")
+    print("     Balanced: Adaptive power, moderate changes, balanced objectives")
+    print("     Aggressive: Performance-first power, large changes, SINR-focused")
+    print("  PRIMARY Power Agent: Main power transmission control (PRIORITY #1)")
+    print("     Density-adaptive power ranges (1-5 dBm in extreme density)")
+    print("     Strategy-guided power exploration")
+    print("     CBR-first optimization with SINR balance")
+    print("  SECONDARY MAC Agent: Beacon/MCS fine-tuning under power guidance")
+    print("     Power-coordinated MAC adjustments")
+    print("     Strategy and power-action aware decisions")
+    print("     Secondary optimization layer")
     print("="*60)
-    print("🔋 POWER-CENTRIC IMPROVEMENTS:")
-    print("  ✅ POWER CONTROLS NETWORK CONGESTION (CBR) - Primary objective")
-    print("  ✅ SECTORAL ANTENNA OPTIMIZATION: Neighbor density split across front/rear")
-    print("  ✅ Density-adaptive power exploration ranges:")
+    print("POWER-CENTRIC IMPROVEMENTS:")
+    print("  POWER CONTROLS NETWORK CONGESTION (CBR) - Primary objective")
+    print("  SECTORAL ANTENNA OPTIMIZATION: Neighbor density split across front/rear")
+    print("  Density-adaptive power exploration ranges")
+    print("  REALISTIC VANET density categorization and power ranges:")
     
-    for density in ["LOW", "MEDIUM", "HIGH", "VERY_HIGH"]:
+    # Display 6-level density categories without icons
+    for density in ["VERY_LOW", "LOW", "MEDIUM", "HIGH", "VERY_HIGH", "EXTREME"]:
         if ANTENNA_TYPE.upper() == "SECTORAL":
-            if density == "LOW":
-                neighbors = "≤8 total (≤5 effective)"
+            if density == "VERY_LOW":
+                neighbors = "≤3 total (≤2 effective)"
+                power_range = "15-30"
+                scenario = "Rural/Highway"
+            elif density == "LOW":
+                neighbors = "≤6 total (≤4 effective)" 
+                power_range = "12-25"
+                scenario = "Sparse Urban"
+            elif density == "MEDIUM":
+                neighbors = "≤12 total (≤8 effective)"
                 power_range = "8-18"
-            elif density == "MEDIUM":
-                neighbors = "≤16 total (≤10 effective)"
-                power_range = "6-15"
+                scenario = "Normal Urban"
             elif density == "HIGH":
-                neighbors = "≤26 total (≤16 effective)"
-                power_range = "4-12"
+                neighbors = "≤18 total (≤12 effective)"
+                power_range = "5-12"
+                scenario = "Dense Urban"
+            elif density == "VERY_HIGH":
+                neighbors = "≤25 total (≤18 effective)"
+                power_range = "3-8"
+                scenario = "Traffic Jam"
             else:
-                neighbors = ">26 total (>16 effective)"
-                power_range = "3-10"
+                neighbors = ">25 total (>18 effective)"
+                power_range = "1-5"
+                scenario = "Extreme Congestion"
         else:
-            if density == "LOW":
-                neighbors = "≤8 total"
-                power_range = "8-20"
+            if density == "VERY_LOW":
+                neighbors = "≤2 total"
+                power_range = "15-30"
+                scenario = "Rural/Highway"
+            elif density == "LOW":
+                neighbors = "≤5 total"
+                power_range = "12-25" 
+                scenario = "Sparse Urban"
             elif density == "MEDIUM":
-                neighbors = "≤16 total"
-                power_range = "5-15"
+                neighbors = "≤10 total"
+                power_range = "8-18"
+                scenario = "Normal Urban"
             elif density == "HIGH":
-                neighbors = "≤25 total"
-                power_range = "3-12"
+                neighbors = "≤15 total"
+                power_range = "5-12"
+                scenario = "Dense Urban"
+            elif density == "VERY_HIGH":
+                neighbors = "≤22 total"
+                power_range = "3-8"
+                scenario = "Traffic Jam"
             else:
-                neighbors = ">25 total"
-                power_range = "1-10"
-        print(f"     {density:>10}: {neighbors:<25} → {power_range:>5} dBm")
+                neighbors = ">22 total"
+                power_range = "1-5"
+                scenario = "Extreme Congestion"
+        print(f"     {density:>9}: {neighbors:<22} → {power_range:>5} dBm ({scenario})")
     
-    print("  ✅ Power-coordinated MAC fine-tuning (no conflicts)")
-    print("  ✅ Strategy-guided power behavior (Conservative→Low, Aggressive→High)")
-    print("  ✅ Power efficiency tracking and optimization")
-    print("  ✅ Power dominance ratio monitoring (target: >60%)")
+    print("  Power-coordinated MAC fine-tuning (no conflicts)")
+    print("  Strategy-guided power behavior (Conservative→Low, Aggressive→High)")
+    print("  Power efficiency tracking and optimization")
+    print("  Power dominance ratio monitoring (target: >60%)")
     print("="*60)
-    print("🎯 PERFORMANCE TARGETS:")
+    print("PERFORMANCE TARGETS:")
     print(f"  CBR Target: {CBR_TARGET} (Primary - controlled by power)")
     print(f"  SINR Target: {SINR_TARGET} dB (Secondary - fine-tuned by MAC)")
     print(f"  CBR Acceptable Range: {CBR_RANGE[0]} - {CBR_RANGE[1]}")
     print(f"  Power Efficiency Target: >60% (within density-appropriate ranges)")
     print("="*60)
-    print("🔋 Q-TABLE DIMENSIONS (Power-Centric):")
+    print("Q-TABLE DIMENSIONS (Power-Centric):")
     print(f"  Meta-Controller: {meta_q_table.shape}")
     print(f"  PRIMARY Power Agent: {power_q_table.shape}")
     print(f"  SECONDARY MAC Agent: {mac_q_table.shape}")
     print(f"  Total Parameters: {meta_q_table.size + power_q_table.size + mac_q_table.size:,}")
     print(f"  Power Agent Parameters: {power_q_table.size:,} ({power_q_table.size/(meta_q_table.size + power_q_table.size + mac_q_table.size)*100:.1f}%)")
     print("="*60)
-    print("🔋 POWER-CENTRIC COORDINATION FEATURES:")
+    print("POWER-CENTRIC COORDINATION FEATURES:")
     print("  • Power agent has PRIORITY in decision making")
     print("  • MAC agent coordinates with power decisions")
     print("  • Density-adaptive power exploration (intelligent bounds)")
@@ -1948,7 +1996,7 @@ def main():
     
     if training_mode:
         print("="*60)
-        print("🔋 POWER-CENTRIC TRAINING PARAMETERS:")
+        print("POWER-CENTRIC TRAINING PARAMETERS:")
         print(f"  Learning Rate: {LEARNING_RATE}")
         print(f"  Discount Factor: {DISCOUNT_FACTOR}")
         print(f"  Initial Epsilon: {EPSILON}")
@@ -1956,25 +2004,25 @@ def main():
         print(f"  Min Epsilon: {MIN_EPSILON}")
         print("  Power Agent: Slower epsilon decay (more exploration)")
         print("  MAC Agent: Faster epsilon decay (follows power decisions)")
-        print(f"  🔄 Model Save Interval: {MODEL_SAVE_INTERVAL} episodes")
-        print(f"  📊 Performance Log Interval: {PERFORMANCE_LOG_INTERVAL} episodes")
-        print("  🛑 Press Ctrl+C to stop and save models")
+        print(f"  Model Save Interval: {MODEL_SAVE_INTERVAL} episodes")
+        print(f"  Performance Log Interval: {PERFORMANCE_LOG_INTERVAL} episodes")
+        print("  Press Ctrl+C to stop and save models")
     else:
         print("="*60)
-        print("🔋 POWER-CENTRIC TESTING MODE:")
+        print("POWER-CENTRIC TESTING MODE:")
         print(f"  Using pre-trained power-centric models:")
         print(f"    Meta: {META_MODEL_PATH}")
         print(f"    PRIMARY Power: {POWER_MODEL_PATH}")
         print(f"    SECONDARY MAC: {MAC_MODEL_PATH}")
     
     print("="*60)
-    print("🔋 EXPECTED POWER-CENTRIC BENEFITS:")
-    print("  1. 🎯 DIRECT CBR CONTROL: Power directly controls network congestion")
-    print("  2. 🧠 INTELLIGENT POWER RANGES: Density-adaptive exploration prevents connectivity issues")
-    print("  3. 🤝 COORDINATED DECISIONS: MAC fine-tunes under power guidance (no conflicts)")
-    print("  4. ⚡ EFFICIENCY OPTIMIZATION: Power usage optimized for density conditions")
-    print("  5. 📈 FASTER CONVERGENCE: Clear priority hierarchy reduces training complexity")
-    print("  6. 🎛️ STRATEGY ALIGNMENT: Power behavior adapts to network strategy needs")
+    print("EXPECTED POWER-CENTRIC BENEFITS:")
+    print("  1. DIRECT CBR CONTROL: Power directly controls network congestion")
+    print("  2. INTELLIGENT POWER RANGES: Density-adaptive exploration prevents connectivity issues")
+    print("  3. COORDINATED DECISIONS: MAC fine-tunes under power guidance (no conflicts)")
+    print("  4. EFFICIENCY OPTIMIZATION: Power usage optimized for density conditions")
+    print("  5. FASTER CONVERGENCE: Clear priority hierarchy reduces training complexity")
+    print("  6. STRATEGY ALIGNMENT: Power behavior adapts to network strategy needs")
     print("="*120)
     
     # Initialize and start power-centric hierarchical server
@@ -1996,7 +2044,7 @@ def main():
         logger.error(f"Unexpected error: {e}")
         rl_server.stop()
     finally:
-        logger.info("🔋 Power-Centric System shutdown complete")
+        logger.info("Power-Centric System shutdown complete")
 
 if __name__ == "__main__":
     main()
